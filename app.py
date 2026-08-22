@@ -34,7 +34,7 @@ st.set_page_config(
     page_title="臺東縣消防局 消防及義消子女獎學金 智慧申請審核系統",
     page_icon="🚒",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # 自訂樣式
@@ -225,8 +225,7 @@ if "last_submitted_case" not in st.session_state:
 
 # ----------------- 側邊欄 -----------------
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/firefighter.png", width=64)
-    st.title("臺東縣消防局 獎學金系統")
+    st.markdown("## 🚒 臺東縣消防局\n### 獎學金申請審核系統")
     
     if not st.session_state.is_admin:
         st.info("📍 **當前身分：申請同仁專區**\n\n(已啟用個資防護，僅可交件)")
