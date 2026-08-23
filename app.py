@@ -1,6 +1,6 @@
 """
 臺東縣消防局 消防及義消子女獎學金 AI 智慧審核網頁系統
-前後台分流權限設計 (同仁申請交件專區 vs 各大隊及業務科審核後台)
+前後台分流權限設計 ‧ 磁碟自動儲存 (./uploads/ & ./data/獎學金總表.xlsx) ‧ 雲端試算表自動同步
 """
 
 import os
@@ -19,6 +19,17 @@ import importlib
 import excel_exporter
 importlib.reload(excel_exporter)
 from excel_exporter import export_scholarship_excel
+
+import storage_manager
+importlib.reload(storage_manager)
+from storage_manager import (
+    save_case_to_storage,
+    load_stored_cases,
+    package_uploads_zip,
+    EXCEL_FILE,
+    UPLOADS_DIR,
+    DATA_DIR
+)
 
 from org_structure import TAITUNG_FIRE_ORG, get_level1_units, get_level2_units
 from gemini_analyzer import (
@@ -204,9 +215,10 @@ try:
 except Exception:
     pass
 
-# 初始化 Session State
+# 初始化 Session State (優先從 ./data/records.json 載入歷史儲存紀錄)
 if "records" not in st.session_state:
-    st.session_state.records = get_mock_cases()
+    stored = load_stored_cases()
+    st.session_state.records = stored if stored else get_mock_cases()
 
 if "selected_case_id" not in st.session_state:
     st.session_state.selected_case_id = st.session_state.records[0]["id"] if st.session_state.records else None
@@ -252,9 +264,9 @@ with st.sidebar:
             st.rerun()
             
         with st.expander("🔗 審核後台專屬直通網址", expanded=False):
-            admin_direct_url = f"https://reform-masters-hostels-glucose.trycloudflare.com/?admin={DEFAULT_ADMIN_PASSWORD}"
+            admin_direct_url = f"https://means-brandon-tip-snap.trycloudflare.com/?admin={DEFAULT_ADMIN_PASSWORD}"
             st.text_input("專屬直通網址 (可加入書籤)", value=admin_direct_url, help="此網址可直接進入審核後台，免手動輸入密碼")
-            st.caption("提示：此網址請僅供各大隊及業務科審核承辦人員保存使用。")
+            st.caption("提示：各大隊與業務科審核承辦人可將此網址加入書籤。")
             
         st.markdown("---")
         st.subheader("🔑 Google GenAI 設定")
@@ -315,23 +327,13 @@ with st.sidebar:
             if st.button("🗑️ 清空所有資料", use_container_width=True):
                 st.session_state.records = []
                 st.session_state.selected_case_id = None
+                if os.path.exists(os.path.join(DATA_DIR, "records.json")):
+                    try:
+                        os.remove(os.path.join(DATA_DIR, "records.json"))
+                    except Exception:
+                        pass
                 st.warning("已清空所有資料！")
                 st.rerun()
-
-    st.markdown("---")
-    local_ip = get_local_ip()
-    mobile_url = f"http://{local_ip}:8501"
-    
-    with st.expander("📱 手機拍照掃描 QR Code", expanded=False):
-        st.markdown("**同仁手機請連同一個 Wi-Fi**，並以手機相機掃描下方 QR Code：")
-        qr = qrcode.QRCode(box_size=4, border=2)
-        qr.add_data(mobile_url)
-        qr.make(fit=True)
-        qr_img = qr.make_image(fill_color="black", back_color="white")
-        
-        qr_buf = io.BytesIO()
-        qr_img.save(qr_buf, format="PNG")
-        st.image(qr_buf.getvalue(), caption=f"手機直連：{mobile_url}", use_container_width=True)
 
     st.markdown("---")
     st.subheader("📌 審查標準門檻")
@@ -403,13 +405,13 @@ if not st.session_state.is_admin:
         st.markdown("---")
         if status == "符合資格":
             st.markdown(f'<div class="badge-eligible">🟢 初步審查：符合資格</div> &nbsp; <b>{rec.get("review_reason")}</b>', unsafe_allow_html=True)
-            st.success("🎉 您上傳的文件齊全且成績達標！資料已送出至大隊與業務科，請靜候後續核定通知。")
+            st.success("🎉 您上傳的文件齊全且成績達標！資料已自動永久存檔並送出至大隊與業務科，請靜候後續核定通知。")
         elif status == "待補件":
             st.markdown(f'<div class="badge-pending">🟡 初步審查：需補件</div> &nbsp; <b>{rec.get("review_reason")}</b>', unsafe_allow_html=True)
-            st.warning(f"⚠️ 您的申請資料已收件，但請注意：**{rec.get('review_reason')}**。請於收件截止日前補正檔案以利核發。")
+            st.warning(f"⚠️ 您的申請資料已收件存檔，但請注意：**{rec.get('review_reason')}**。請於收件截止日前補正檔案以利核發。")
         else:
             st.markdown(f'<div class="badge-ineligible">🔴 初步審查：未達門檻</div> &nbsp; <b>{rec.get("review_reason")}</b>', unsafe_allow_html=True)
-            st.info("ℹ️ 您的資料已成功送出，承辦人員將於複核階段再次人工核對。")
+            st.info("ℹ️ 您的資料已成功送出並自動存檔，承辦人員將於複核階段再次人工核對。")
             
         st.markdown("</div>", unsafe_allow_html=True)
         
@@ -521,7 +523,7 @@ if not st.session_state.is_admin:
                         model_name="gemini-3.6-flash"
                     )
                     
-                    progress_bar.progress(85, text="正在比對審查標準與 5 項必備附件...")
+                    progress_bar.progress(75, text="正在比對審查標準與 5 項必備附件...")
                     
                     new_case_id = f"TTFD-2026-{len(st.session_state.records)+1:03d}"
                     
@@ -545,12 +547,24 @@ if not st.session_state.is_admin:
                         "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     
+                    # 💾 自動存入 ./uploads/ 與追加寫入 ./data/獎學金總表.xlsx
+                    progress_bar.progress(90, text="正在儲存原始照片至 ./uploads/ 並追加至總表 Excel...")
+                    save_case_to_storage(new_case)
+                    
                     st.session_state.records.append(new_case)
                     st.session_state.selected_case_id = new_case["id"]
                     st.session_state.last_submitted_case = new_case
                     st.session_state.camera_photos = []
                     
-                    progress_bar.progress(100, text="✅ 交件成功！")
+                    # 若有設定 Google Sheets Webhook，同時自動同步雲端試算表
+                    webhook_url = st.session_state.get("google_sheet_webhook", "")
+                    if webhook_url:
+                        try:
+                            sync_to_google_sheets(webhook_url, st.session_state.records)
+                        except Exception:
+                            pass
+                            
+                    progress_bar.progress(100, text="✅ 交件成功並已永久存檔！")
                     time.sleep(0.5)
                     st.balloons()
                     st.rerun()
@@ -565,7 +579,7 @@ else:
     st.markdown("""
     <div class="main-header">
         <h1>🚒 臺東縣消防局 獎學金審核管理系統【各大隊及業務科專用】</h1>
-        <p>管理員後台 ‧ 左圖右表人工複核 ‧ 完整申請人個資名冊 ‧ Excel 清冊匯出 ‧ Google 雲端試算表即時同步</p>
+        <p>管理員後台 ‧ 自動儲存 (./uploads/ & 獎學金總表.xlsx) ‧ 左圖右表人工複核 ‧ Google 雲端試算表即時同步</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -728,7 +742,7 @@ else:
                         st.markdown(f'<div class="badge-ineligible">🔴 不符資格</div> &nbsp; <b>{calc_reason}</b>', unsafe_allow_html=True)
                         
                     st.markdown("<br>", unsafe_allow_html=True)
-                    submit_btn = st.form_submit_button("💾 儲存並更新審核結果", use_container_width=True)
+                    submit_btn = st.form_submit_button("💾 儲存並更新審核結果 (同步存檔)", use_container_width=True)
                     
                     if submit_btn:
                         curr_case["unit_level1"] = edit_l1
@@ -746,7 +760,8 @@ else:
                         curr_case["is_eligible"] = is_elig
                         
                         st.session_state.records[curr_case_idx] = curr_case
-                        st.success(f"已成功儲存【{curr_case['id']}】的複核結果！")
+                        save_case_to_storage(curr_case)
+                        st.success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
                         st.rerun()
 
     # ----------------- 後台 TAB 2: 承辦人代為上傳 -----------------
@@ -766,14 +781,14 @@ else:
             key="admin_file_uploader"
         )
         
-        if admin_uploaded_files and st.button("🚀 啟動 AI 辨識並加入總表", use_container_width=True, type="primary"):
+        if admin_uploaded_files and st.button("🚀 啟動 AI 辨識並加入總表存檔", use_container_width=True, type="primary"):
             admin_imgs, admin_lbls = [], []
             for f in admin_uploaded_files:
                 for p_img, p_label in process_uploaded_file(f):
                     admin_imgs.append(p_img)
                     admin_lbls.append(p_label)
                     
-            with st.spinner("AI 解析中..."):
+            with st.spinner("AI 解析並存檔中..."):
                 ai_res = analyze_scholarship_documents(admin_imgs, st.session_state.api_key, "gemini-3.6-flash")
                 case_id = f"TTFD-2026-{len(st.session_state.records)+1:03d}"
                 new_c = {
@@ -792,11 +807,13 @@ else:
                     "is_eligible": ai_res.get("is_eligible", False),
                     "notes": ai_res.get("notes", ""),
                     "images": admin_imgs,
-                    "image_labels": admin_lbls
+                    "image_labels": admin_lbls,
+                    "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
+                save_case_to_storage(new_c)
                 st.session_state.records.append(new_c)
                 st.session_state.selected_case_id = new_c["id"]
-                st.success(f"✅ 成功加入案件【{new_c['id']}】！")
+                st.success(f"✅ 成功加入案件【{new_c['id']}】並存入 ./uploads/ 與總表！")
                 st.rerun()
 
     # ----------------- 後台 TAB 3: 總表清冊與匯出 -----------------
@@ -883,13 +900,25 @@ else:
                     type="primary"
                 )
                 
+                # 📦 一鍵下載所有分隊上傳的原始照片壓縮包
+                st.markdown("<br>", unsafe_allow_html=True)
+                zip_bytes = package_uploads_zip()
+                st.download_button(
+                    label="📦 一鍵下載所有分隊上傳原始照片壓縮包 (.zip)",
+                    data=zip_bytes,
+                    file_name=f"臺東縣消防局_獎學金申請原始檔案打包_{timestamp}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+                
             with col_e2:
-                st.markdown("##### 📋 Excel 清冊規格說明")
-                st.markdown("""
-                - **組織單位**：含「大隊/局本部」與「分隊/科室」雙階層欄位
-                - **表頭設計**：臺東縣消防局標準格式
-                - **彙總統計**：申請件數、合格人數、補件與通過率
-                - **簽章欄位**：預留承辦人複核簽章欄供紙本歸檔
+                st.markdown("##### 📋 本地儲存與清冊規格說明")
+                st.markdown(f"""
+                - **檔案自動歸檔**：
+                  - 原始照片：`./uploads/`
+                  - 數據總表：`./data/獎學金總表.xlsx`
+                - **清冊欄位**：完整 14 欄（含案件編號、雙階層組織、5項檢核、簽章）
+                - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片
                 """)
                 
             st.markdown("---")
