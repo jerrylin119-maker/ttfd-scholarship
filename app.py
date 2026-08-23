@@ -189,6 +189,16 @@ SECRETS_FILE = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.to
 DEFAULT_ADMIN_PASSWORD = "ttfd888"
 
 def load_persistent_api_key() -> str:
+    # 1. 優先從 Streamlit Cloud 內建 Secrets 讀取 (支援雲端發布)
+    try:
+        if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+            val = str(st.secrets["GEMINI_API_KEY"]).strip()
+            if val:
+                return val
+    except Exception:
+        pass
+
+    # 2. 從本機 .streamlit/secrets.toml 讀取
     if os.path.exists(SECRETS_FILE):
         try:
             with open(SECRETS_FILE, "r", encoding="utf-8") as f:
@@ -199,13 +209,22 @@ def load_persistent_api_key() -> str:
                             return val
         except Exception:
             pass
+            
+    # 3. 從環境變數讀取
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 
 def save_persistent_api_key(key: str):
-    os.makedirs(os.path.dirname(SECRETS_FILE), exist_ok=True)
-    with open(SECRETS_FILE, "w", encoding="utf-8") as f:
-        f.write('GEMINI_API_KEY = "' + key.strip() + '"\n')
-    os.environ["GEMINI_API_KEY"] = key.strip()
+    clean_key = key.strip()
+    os.environ["GEMINI_API_KEY"] = clean_key
+    st.session_state.api_key = clean_key
+    
+    # 嘗試寫入本機檔案 (若在 Streamlit 雲端唯讀環境則安全跳過，避免 OSError)
+    try:
+        os.makedirs(os.path.dirname(SECRETS_FILE), exist_ok=True)
+        with open(SECRETS_FILE, "w", encoding="utf-8") as f:
+            f.write('GEMINI_API_KEY = "' + clean_key + '"\n')
+    except Exception:
+        pass
 
 # 檢查網址參數是否帶有管理員/審核專用直通金鑰 (如 ?admin=ttfd888)
 try:
