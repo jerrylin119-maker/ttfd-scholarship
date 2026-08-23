@@ -37,8 +37,17 @@ from gemini_analyzer import (
     evaluate_eligibility,
     ATTACHMENT_NAMES
 )
-from mock_data import get_mock_cases
-from cloud_sync import sync_to_google_sheets, GOOGLE_APPS_SCRIPT_TEMPLATE
+import cloud_sync
+importlib.reload(cloud_sync)
+from cloud_sync import sync_to_google_sheets, test_webhook_connection, GOOGLE_APPS_SCRIPT_TEMPLATE
+
+@st.cache_resource
+def get_global_server_config():
+    """全伺服器所有連線共享之全域設定 (Webhook 網址與 API Key)"""
+    return {
+        "webhook_url": "",
+        "api_key": ""
+    }
 
 # 頁面配置
 st.set_page_config(
@@ -226,6 +235,52 @@ def save_persistent_api_key(key: str):
     except Exception:
         pass
 
+def load_persistent_webhook() -> str:
+    # 1. 優先從全域伺服器共享記憶體讀取
+    g_conf = get_global_server_config()
+    if g_conf.get("webhook_url"):
+        return g_conf["webhook_url"]
+        
+    # 2. 從 Streamlit Secrets 讀取
+    try:
+        if hasattr(st, "secrets") and "GOOGLE_SHEET_WEBHOOK" in st.secrets:
+            val = str(st.secrets["GOOGLE_SHEET_WEBHOOK"]).strip()
+            if val:
+                g_conf["webhook_url"] = val
+                return val
+    except Exception:
+        pass
+        
+    # 3. 從本地檔案讀取
+    webhook_f = os.path.join(DATA_DIR, "webhook.txt")
+    if os.path.exists(webhook_f):
+        try:
+            with open(webhook_f, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                if val:
+                    g_conf["webhook_url"] = val
+                    return val
+        except Exception:
+            pass
+            
+    env_val = os.environ.get("GOOGLE_SHEET_WEBHOOK") or ""
+    if env_val:
+        g_conf["webhook_url"] = env_val
+    return env_val
+
+def save_persistent_webhook(url: str):
+    clean_url = url.strip()
+    st.session_state.google_sheet_webhook = clean_url
+    os.environ["GOOGLE_SHEET_WEBHOOK"] = clean_url
+    get_global_server_config()["webhook_url"] = clean_url
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        webhook_f = os.path.join(DATA_DIR, "webhook.txt")
+        with open(webhook_f, "w", encoding="utf-8") as f:
+            f.write(clean_url)
+    except Exception:
+        pass
+
 # 檢查網址參數是否帶有管理員/審核專用直通金鑰 (如 ?admin=ttfd888)
 try:
     if "admin" in st.query_params:
@@ -238,6 +293,9 @@ except Exception:
 if "records" not in st.session_state:
     stored = load_stored_cases()
     st.session_state.records = stored if stored else get_mock_cases()
+
+if "google_sheet_webhook" not in st.session_state:
+    st.session_state.google_sheet_webhook = load_persistent_webhook()
 
 if "selected_case_id" not in st.session_state:
     st.session_state.selected_case_id = st.session_state.records[0]["id"] if st.session_state.records else None
@@ -576,10 +634,10 @@ if not st.session_state.is_admin:
                     st.session_state.camera_photos = []
                     
                     # 若有設定 Google Sheets Webhook，同時自動同步雲端試算表
-                    webhook_url = st.session_state.get("google_sheet_webhook", "")
+                    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                     if webhook_url:
                         try:
-                            sync_to_google_sheets(webhook_url, st.session_state.records)
+                            ok_sync, sync_msg = sync_to_google_sheets(webhook_url, st.session_state.records)
                         except Exception:
                             pass
                             
@@ -950,18 +1008,32 @@ else:
                     help="請貼上您的 Google Apps Script 網路應用程式部署網址 (https://script.google.com/macros/s/.../exec)"
                 )
                 if webhook_url != st.session_state.get("google_sheet_webhook", ""):
-                    st.session_state.google_sheet_webhook = webhook_url
+                    save_persistent_webhook(webhook_url)
                     
-                if st.button("☁️ 立即同步審核名冊至 Google 雲端試算表", use_container_width=True, type="primary"):
-                    if not webhook_url:
-                        st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
-                    else:
-                        with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
-                            success, msg = sync_to_google_sheets(webhook_url, st.session_state.records)
-                            if success:
-                                st.success(f"🎉 {msg}")
-                            else:
-                                st.error(f"❌ {msg}")
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("🧪 測試 Webhook 連線", use_container_width=True):
+                        if not webhook_url:
+                            st.warning("請先輸入 Webhook 網址！")
+                        else:
+                            with st.spinner("連線測試中..."):
+                                ok, test_msg = test_webhook_connection(webhook_url)
+                                if ok:
+                                    st.success(test_msg)
+                                else:
+                                    st.error(test_msg)
+                                    
+                with col_btn2:
+                    if st.button("☁️ 立即同步至 Google 試算表", use_container_width=True, type="primary"):
+                        if not webhook_url:
+                            st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                        else:
+                            with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
+                                success, msg = sync_to_google_sheets(webhook_url, st.session_state.records)
+                                if success:
+                                    st.success(f"🎉 {msg}")
+                                else:
+                                    st.error(f"❌ {msg}")
                                 
             with col_g2:
                 with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):

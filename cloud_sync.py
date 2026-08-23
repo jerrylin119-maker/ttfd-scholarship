@@ -1,4 +1,4 @@
-﻿"""
+"""
 消防及義消子女獎學金 AI 智慧審核系統 - 雲端試算表同步模組 (含兩階層組織單位)
 """
 
@@ -8,50 +8,79 @@ import requests
 
 GOOGLE_APPS_SCRIPT_TEMPLATE = """
 // === 請將以下程式碼貼入 Google 試算表的「擴充功能」->「Apps Script」並部署為「網路應用程式」===
+
+function doGet(e) {
+  return ContentService.createTextOutput(JSON.stringify({
+    status: "ok",
+    message: "🚒 臺東縣消防局 獎學金同步 Webhook 連線正常！"
+  })).setMimeType(ContentService.MimeType.JSON);
+}
+
 function doPost(e) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  var data = JSON.parse(e.postData.contents);
-  var rows = data.records;
-  
-  sheet.clear();
-  var headers = [
-    "序號", "案件編號", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
-    "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "同步時間"
-  ];
-  sheet.appendRow(headers);
-  sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
-  
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    sheet.appendRow([
-      i + 1,
-      r.id || "",
-      r.unit_level1 || "",
-      r.unit_level2 || "",
-      r.applicant_name || "",
-      r.applicant_id || "",
-      r.child_name || "",
-      r.category || "",
-      r.semester_gpa !== null ? r.semester_gpa : "-",
-      r.conduct || "",
-      r.attachment_desc || "",
-      r.review_status || "",
-      r.review_reason || "",
-      new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"})
-    ]);
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var data = JSON.parse(e.postData.contents);
+    var rows = data.records;
+    
+    // 清除現有內容並寫入 14 欄標準表頭
+    sheet.clear();
+    var headers = [
+      "序號", "案件編號", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
+      "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "最後同步時間"
+    ];
+    sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+    
+    // 寫入每一列資料
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      sheet.appendRow([
+        i + 1,
+        r.id || "",
+        r.unit_level1 || "",
+        r.unit_level2 || "",
+        r.applicant_name || "",
+        r.applicant_id || "",
+        r.child_name || "",
+        r.category || "",
+        r.semester_gpa !== null && r.semester_gpa !== undefined ? r.semester_gpa : "-",
+        r.conduct || "",
+        r.attachment_desc || "",
+        r.review_status || "",
+        r.review_reason || "",
+        new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"})
+      ]);
+    }
+    
+    sheet.autoResizeColumns(1, headers.length);
+    return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
   }
-  
-  sheet.autoResizeColumns(1, headers.length);
-  return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length}))
-    .setMimeType(ContentService.MimeType.JSON);
 }
 """
+
+def test_webhook_connection(webhook_url: str) -> Tuple[bool, str]:
+    """測試 Google Apps Script Webhook 是否可連通"""
+    if not webhook_url or not webhook_url.startswith("http"):
+        return False, "未輸入有效的 Webhook 網址 (開頭需為 https://script.google.com/...)"
+    try:
+        resp = requests.get(webhook_url.strip(), timeout=10, allow_redirects=True)
+        if resp.status_code == 200:
+            return True, "✅ 連線測試成功！Google 試算表 Webhook 回應正常。"
+        else:
+            return False, f"⚠️ 連線回應異常，狀態碼：{resp.status_code}"
+    except Exception as e:
+        return False, f"❌ 無法連線至該網址：{str(e)}"
 
 def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tuple[bool, str]:
     """
     將目前的審核紀錄同步至指定的 Google Sheets Webhook URL
     """
-    if not webhook_url or not webhook_url.startswith("http"):
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
         return False, "未設定有效的 Google 試算表 Webhook 網址"
         
     formatted_records = []
@@ -90,10 +119,10 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
     
     try:
         resp = requests.post(
-            webhook_url,
-            json=payload,
+            clean_url,
+            data=json.dumps(payload),
             headers={"Content-Type": "application/json"},
-            timeout=15,
+            timeout=20,
             allow_redirects=True
         )
         if resp.status_code in (200, 302):
