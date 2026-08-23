@@ -390,26 +390,42 @@ with st.sidebar:
         active_model_name = model_choice.split(" ")[0]
         
         st.markdown("---")
-        st.subheader("⚡ 管理快捷操作")
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            if st.button("🔄 載入示範資料", use_container_width=True):
+        st.subheader("⚡ 測試與資料管理")
+        with st.expander("🛠️ 測試資料重置工具", expanded=True):
+            st.caption("💡 **安全說明**：此清空按鈕僅會清空網頁暫存與本地測試照片，**絕不會刪除或影響 Google 雲端試算表上的任何紀錄**！")
+            if st.button("🗑️ 清空網頁與測試資料 (保留 Google 雲端)", use_container_width=True):
+                st.session_state.records = []
+                st.session_state.selected_case_id = None
+                st.session_state.last_submitted_case = None
+                st.session_state.camera_photos = []
+                
+                # 清理本地 records.json 與 Excel
+                for f_name in ["records.json", "獎學金總表.xlsx"]:
+                    f_p = os.path.join(DATA_DIR, f_name)
+                    if os.path.exists(f_p):
+                        try:
+                            os.remove(f_p)
+                        except Exception:
+                            pass
+                            
+                # 清理 uploads 照片
+                if os.path.exists(UPLOADS_DIR):
+                    try:
+                        for fn in os.listdir(UPLOADS_DIR):
+                            fp = os.path.join(UPLOADS_DIR, fn)
+                            if os.path.isfile(fp):
+                                os.remove(fp)
+                    except Exception:
+                        pass
+                        
+                st.success("✅ 已清空網頁與測試暫存！您的 Google 雲端試算表資料完好保留。")
+                st.rerun()
+                
+            if st.button("🔄 重新載入 4 筆擬真示範案件", use_container_width=True):
                 st.session_state.records = get_mock_cases()
                 if st.session_state.records:
                     st.session_state.selected_case_id = st.session_state.records[0]["id"]
                 st.success("已載入臺東縣消防局 4 筆擬真示範案例！")
-                st.rerun()
-                
-        with col_s2:
-            if st.button("🗑️ 清空所有資料", use_container_width=True):
-                st.session_state.records = []
-                st.session_state.selected_case_id = None
-                if os.path.exists(os.path.join(DATA_DIR, "records.json")):
-                    try:
-                        os.remove(os.path.join(DATA_DIR, "records.json"))
-                    except Exception:
-                        pass
-                st.warning("已清空所有資料！")
                 st.rerun()
 
     st.markdown("---")
