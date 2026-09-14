@@ -65,3 +65,12 @@ def get_level1_units():
 
 def get_level2_units(level1: str):
     return TAITUNG_FIRE_ORG.get(level1, [])
+
+# 獎學金類別 (申請時需擇一，雲端試算表與 Excel 清冊將依此分開建立)
+SCHOLARSHIP_TYPES = [
+    "義消聯合總會獎助學金",
+    "本局津芳冰城陳慶銳先生獎學金"
+]
+
+def get_scholarship_types():
+    return list(SCHOLARSHIP_TYPES)

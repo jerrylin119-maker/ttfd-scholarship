@@ -10,9 +10,6 @@ import zipfile
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from PIL import Image
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
@@ -73,118 +70,22 @@ def save_case_to_storage(case_dict: Dict[str, Any]) -> Tuple[bool, str]:
     with open(JSON_FILE, "w", encoding="utf-8") as f:
         json.dump(all_records, f, ensure_ascii=False, indent=2)
         
-    # 3. 追加寫入 ./data/獎學金總表.xlsx
+    # 3. 依「獎學金類別」重新產生 ./data/獎學金總表.xlsx (自動分頁：義消聯合總會獎助學金 / 本局津芳冰城陳慶銳先生獎學金)
     try:
-        append_case_to_excel(case_dict, len(all_records))
+        append_case_to_excel(all_records)
     except Exception as e:
         print(f"Error appending to Excel: {e}")
-        
+
     return True, f"已成功將 {len(saved_paths)} 張照片存入 ./uploads/，並將數據追加至 ./data/獎學金總表.xlsx！"
 
-def append_case_to_excel(case_dict: Dict[str, Any], seq_num: int):
-    """將單筆案件追加寫入 Excel 總表"""
+def append_case_to_excel(all_records: List[Dict[str, Any]]):
+    """依目前完整紀錄清單，重新產生 ./data/獎學金總表.xlsx (依獎學金類別自動分頁)"""
     from excel_exporter import export_scholarship_excel
-    
+
     ensure_directories()
-    
-    # 若 Excel 還不存在，直接完整生成
-    if not os.path.exists(EXCEL_FILE):
-        excel_bytes = export_scholarship_excel([case_dict])
-        with open(EXCEL_FILE, "wb") as f:
-            f.write(excel_bytes.getvalue())
-        return
-        
-    # 若已存在，使用 openpyxl 載入並追加列
-    try:
-        wb = openpyxl.load_workbook(EXCEL_FILE)
-        ws = wb.active
-    except Exception:
-        # 若檔案損毀則重新生成
-        excel_bytes = export_scholarship_excel([case_dict])
-        with open(EXCEL_FILE, "wb") as f:
-            f.write(excel_bytes.getvalue())
-        return
-        
-    font_data = Font(name="微軟正黑體", size=10, color="000000")
-    thin_border_side = Side(style='thin', color='D3D3D3')
-    border_cell = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
-    fill_zebra = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
-    fill_eligible = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
-    fill_pending = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
-    fill_ineligible = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
-    font_status_eligible = Font(name="微軟正黑體", size=10, bold=True, color="155724")
-    font_status_pending = Font(name="微軟正黑體", size=10, bold=True, color="856404")
-    font_status_ineligible = Font(name="微軟正黑體", size=10, bold=True, color="721C24")
-    
-    att = case_dict.get("attachments", {})
-    att_keys = [
-        ("application_form", "申請表"),
-        ("student_id_or_enrollment", "在學證明"),
-        ("transcript", "成績單"),
-        ("household_registration", "戶籍資料"),
-        ("service_certificate", "服務證明")
-    ]
-    present_count = sum(1 for k, _ in att_keys if att.get(k, False))
-    if present_count == 5:
-        att_text = "齊全 (5/5)"
-    else:
-        missing_names = [name for k, name in att_keys if not att.get(k, False)]
-        att_text = f"缺: {', '.join(missing_names)} ({present_count}/5)"
-        
-    status = case_dict.get("review_status", "待審核")
-    gpa = case_dict.get("semester_gpa")
-    gpa_val = f"{gpa:.2f}" if gpa is not None else "無"
-    
-    # 計算追加列號 (表頭在第 6 列，第 7 列起為資料)
-    curr_row = max(ws.max_row + 1, 7)
-    
-    row_values = [
-        seq_num,
-        case_dict.get("id", ""),
-        case_dict.get("unit_level1", "未指定"),
-        case_dict.get("unit_level2", "未指定"),
-        case_dict.get("applicant_name", ""),
-        case_dict.get("applicant_id", ""),
-        case_dict.get("child_name", ""),
-        case_dict.get("category", ""),
-        gpa_val,
-        case_dict.get("conduct", ""),
-        att_text,
-        status,
-        case_dict.get("review_reason", case_dict.get("notes", "")),
-        ""
-    ]
-    
-    for col_idx, val in enumerate(row_values, 1):
-        cell = ws.cell(row=curr_row, column=col_idx, value=val)
-        cell.font = font_data
-        cell.border = border_cell
-        
-        if seq_num % 2 == 0:
-            cell.fill = fill_zebra
-            
-        if col_idx in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14):
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        else:
-            cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-            
-        if col_idx == 12:
-            if status == "符合資格":
-                cell.font = font_status_eligible
-                cell.fill = fill_eligible
-            elif status == "待補件":
-                cell.font = font_status_pending
-                cell.fill = fill_pending
-            elif status == "不符資格":
-                cell.font = font_status_ineligible
-                cell.fill = fill_ineligible
-                
-    ws.row_dimensions[curr_row].height = 24
-    
-    # 更新 Row 2 匯出時間與統計摘要列 (Row 3, 4)
-    ws["A2"] = f"匯出機關：臺東縣消防局  |  最後更新：{datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}  |  審核門檻：學期總平均 >= 80.0 且 5 項附件齊全"
-    
-    wb.save(EXCEL_FILE)
+    excel_bytes = export_scholarship_excel(all_records)
+    with open(EXCEL_FILE, "wb") as f:
+        f.write(excel_bytes.getvalue())
 
 def load_stored_cases() -> List[Dict[str, Any]]:
     """從 ./data/records.json 與 ./uploads/ 載入所有歷史儲存案件"""

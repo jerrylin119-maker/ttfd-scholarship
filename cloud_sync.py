@@ -8,6 +8,10 @@ import requests
 
 GOOGLE_APPS_SCRIPT_TEMPLATE = """
 // === 請將以下程式碼貼入 Google 試算表的「擴充功能」->「Apps Script」並部署為「網路應用程式」===
+// 本版本會依「獎學金類別」自動分別寫入不同分頁 (工作表)：
+//   1. 義消聯合總會獎助學金
+//   2. 本局津芳冰城陳慶銳先生獎學金
+// 若日後新增其他類別，會自動以該類別名稱建立新分頁，無需修改程式碼。
 
 function doGet(e) {
   return ContentService.createTextOutput(JSON.stringify({
@@ -16,44 +20,73 @@ function doGet(e) {
   })).setMimeType(ContentService.MimeType.JSON);
 }
 
+function getOrCreateSheet_(ss, name) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+  }
+  return sheet;
+}
+
+function writeHeaderAndRows_(sheet, rows) {
+  // 清除現有內容並寫入 15 欄標準表頭 (含獎學金類別)
+  sheet.clear();
+  var headers = [
+    "序號", "案件編號", "獎學金類別", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
+    "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "最後同步時間"
+  ];
+  sheet.appendRow(headers);
+  sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+
+  var now = new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"});
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    sheet.appendRow([
+      i + 1,
+      r.id || "",
+      r.scholarship_type || "未分類",
+      r.unit_level1 || "",
+      r.unit_level2 || "",
+      r.applicant_name || "",
+      r.applicant_id || "",
+      r.child_name || "",
+      r.category || "",
+      r.semester_gpa !== null && r.semester_gpa !== undefined ? r.semester_gpa : "-",
+      r.conduct || "",
+      r.attachment_desc || "",
+      r.review_status || "",
+      r.review_reason || "",
+      now
+    ]);
+  }
+  sheet.autoResizeColumns(1, headers.length);
+}
+
 function doPost(e) {
   try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
     var data = JSON.parse(e.postData.contents);
     var rows = data.records;
-    
-    // 清除現有內容並寫入 14 欄標準表頭
-    sheet.clear();
-    var headers = [
-      "序號", "案件編號", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
-      "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "最後同步時間"
-    ];
-    sheet.appendRow(headers);
-    sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
-    
-    // 寫入每一列資料
+
+    // 依「獎學金類別」將資料分組，各類別各自寫入獨立分頁
+    var grouped = {};
+    var order = [];
     for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      sheet.appendRow([
-        i + 1,
-        r.id || "",
-        r.unit_level1 || "",
-        r.unit_level2 || "",
-        r.applicant_name || "",
-        r.applicant_id || "",
-        r.child_name || "",
-        r.category || "",
-        r.semester_gpa !== null && r.semester_gpa !== undefined ? r.semester_gpa : "-",
-        r.conduct || "",
-        r.attachment_desc || "",
-        r.review_status || "",
-        r.review_reason || "",
-        new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"})
-      ]);
+      var t = rows[i].scholarship_type || "未分類";
+      if (!grouped[t]) {
+        grouped[t] = [];
+        order.push(t);
+      }
+      grouped[t].push(rows[i]);
     }
-    
-    sheet.autoResizeColumns(1, headers.length);
-    return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length}))
+
+    for (var j = 0; j < order.length; j++) {
+      var typeName = order[j];
+      var sheet = getOrCreateSheet_(ss, typeName);
+      writeHeaderAndRows_(sheet, grouped[typeName]);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length, types: order}))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
@@ -99,6 +132,7 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
         
         formatted_records.append({
             "id": r.get("id", ""),
+            "scholarship_type": r.get("scholarship_type", "未分類"),
             "unit_level1": r.get("unit_level1", "未指定"),
             "unit_level2": r.get("unit_level2", "未指定"),
             "applicant_name": r.get("applicant_name", ""),

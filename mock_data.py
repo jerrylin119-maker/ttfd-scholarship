@@ -179,6 +179,7 @@ def get_mock_cases() -> List[Dict[str, Any]]:
     cases = [
         {
             "id": "CASE-001",
+            "scholarship_type": "義消聯合總會獎助學金",
             "unit_level1": "臺東大隊",
             "unit_level2": "特種搜救分隊",
             "applicant_name": "陳大明",
@@ -203,6 +204,7 @@ def get_mock_cases() -> List[Dict[str, Any]]:
         },
         {
             "id": "CASE-002",
+            "scholarship_type": "本局津芳冰城陳慶銳先生獎學金",
             "unit_level1": "關山大隊",
             "unit_level2": "關山分隊",
             "applicant_name": "林志偉",
@@ -227,6 +229,7 @@ def get_mock_cases() -> List[Dict[str, Any]]:
         },
         {
             "id": "CASE-003",
+            "scholarship_type": "義消聯合總會獎助學金",
             "unit_level1": "成功大隊",
             "unit_level2": "成功分隊",
             "applicant_name": "張建國",
@@ -251,6 +254,7 @@ def get_mock_cases() -> List[Dict[str, Any]]:
         },
         {
             "id": "CASE-004",
+            "scholarship_type": "本局津芳冰城陳慶銳先生獎學金",
             "unit_level1": "大武大隊",
             "unit_level2": "大武分隊",
             "applicant_name": "黃敏華",

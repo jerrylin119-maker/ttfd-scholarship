@@ -31,7 +31,7 @@ from storage_manager import (
     DATA_DIR
 )
 
-from org_structure import TAITUNG_FIRE_ORG, get_level1_units, get_level2_units
+from org_structure import TAITUNG_FIRE_ORG, get_level1_units, get_level2_units, get_scholarship_types
 from mock_data import get_mock_cases
 from gemini_analyzer import (
     analyze_scholarship_documents,
@@ -467,6 +467,7 @@ if not st.session_state.is_admin:
         
         col_r1, col_r2, col_r3 = st.columns(3)
         with col_r1:
+            st.write(f"🏆 **獎學金類別**：{rec.get('scholarship_type', '未指定')}")
             st.write(f"🏢 **所屬單位**：{rec.get('unit_level1')} / {rec.get('unit_level2')}")
             st.write(f"👤 **申請人家長**：{rec.get('applicant_name') or '（依證明文件查驗）'}")
         with col_r2:
@@ -518,19 +519,28 @@ if not st.session_state.is_admin:
     # 申請交件表單區
     st.markdown('<div class="section-title">📤 線上申請交件與照片上傳</div>', unsafe_allow_html=True)
     
+    # 獎學金類別選擇區
+    st.markdown("##### 🏆 第一步：請選擇欲申請的獎學金類別")
+    upload_scholarship_type = st.selectbox(
+        "獎學金類別：",
+        get_scholarship_types(),
+        key="pub_scholarship_type"
+    )
+    st.markdown("---")
+
     # 兩階層組織單位選擇區
-    st.markdown("##### 🏢 第一步：請選擇您的所屬單位")
+    st.markdown("##### 🏢 第二步：請選擇您的所屬單位")
     col_sel_l1, col_sel_l2 = st.columns(2)
     with col_sel_l1:
         upload_level1 = st.selectbox("1. 大隊 / 局本部：", get_level1_units(), key="pub_upload_unit_l1")
     with col_sel_l2:
         level2_choices = get_level2_units(upload_level1)
         upload_level2 = st.selectbox("2. 分隊 / 科室：", level2_choices, key="pub_upload_unit_l2")
-        
-    st.caption(f"📍 您選擇的申請單位：**臺東縣消防局 {upload_level1} ➔ {upload_level2}**")
+
+    st.caption(f"📍 您選擇的申請類別與單位：**{upload_scholarship_type}** ｜ **臺東縣消防局 {upload_level1} ➔ {upload_level2}**")
     st.markdown("---")
-    
-    st.markdown("##### 📁 第二步：選擇上傳照片方式 (可一次傳多張)")
+
+    st.markdown("##### 📁 第三步：選擇上傳照片方式 (可一次傳多張)")
     input_mode = st.radio("請選擇上傳方式：", ["📁 檔案 / PDF / 圖片上傳", "📷 即時相機拍照 (手機專用)"], horizontal=True, key="pub_input_mode")
     
     all_prepared_images = []
@@ -596,7 +606,7 @@ if not st.session_state.is_admin:
     if all_prepared_images:
         st.markdown("---")
         start_ai_btn = st.button(
-            f"🚀 確認交件並開始 AI 智慧審查（{upload_level1}/{upload_level2}）",
+            f"🚀 確認交件並開始 AI 智慧審查（{upload_scholarship_type} - {upload_level1}/{upload_level2}）",
             use_container_width=True,
             type="primary",
             key="pub_start_ai_btn"
@@ -623,6 +633,7 @@ if not st.session_state.is_admin:
                     
                     new_case = {
                         "id": new_case_id,
+                        "scholarship_type": upload_scholarship_type,
                         "unit_level1": upload_level1,
                         "unit_level2": upload_level2,
                         "applicant_name": ai_result.get("applicant_name", ""),
@@ -710,7 +721,7 @@ else:
             st.info("目前尚無任何案件資料。")
         else:
             case_options = {
-                r["id"]: f"【{r.get('id')}】[{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
+                r["id"]: f"【{r.get('id')}】[{r.get('scholarship_type', '未分類')}] [{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
                 for r in st.session_state.records
             }
             
@@ -734,7 +745,7 @@ else:
             
             # 左側圖片區
             with col_left:
-                st.markdown(f'<div class="section-title">🖼️ 原始申請資料與成績單檢視 &nbsp; <span class="unit-tag">{curr_case.get("unit_level1", "")} / {curr_case.get("unit_level2", "")}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="section-title">🖼️ 原始申請資料與成績單檢視 &nbsp; <span class="unit-tag">{curr_case.get("scholarship_type", "未分類")}</span> &nbsp; <span class="unit-tag">{curr_case.get("unit_level1", "")} / {curr_case.get("unit_level2", "")}</span></div>', unsafe_allow_html=True)
                 images = curr_case.get("images", [])
                 image_labels = curr_case.get("image_labels", [])
                 
@@ -761,6 +772,12 @@ else:
                 st.markdown('<div class="section-title">✍️ 承辦人審核複核與狀態判定</div>', unsafe_allow_html=True)
                 
                 with st.form(key=f"admin_review_form_{curr_case['id']}"):
+                    st.markdown("##### 🏆 獎學金類別")
+                    type_list = get_scholarship_types()
+                    curr_type = curr_case.get("scholarship_type", type_list[0])
+                    idx_type = type_list.index(curr_type) if curr_type in type_list else 0
+                    edit_scholarship_type = st.selectbox("獎學金類別", type_list, index=idx_type, key="admin_edit_type")
+
                     st.markdown("##### 🏢 所屬單位")
                     col_u1, col_u2 = st.columns(2)
                     
@@ -839,6 +856,7 @@ else:
                     submit_btn = st.form_submit_button("💾 儲存並更新審核結果 (同步存檔)", use_container_width=True)
                     
                     if submit_btn:
+                        curr_case["scholarship_type"] = edit_scholarship_type
                         curr_case["unit_level1"] = edit_l1
                         curr_case["unit_level2"] = edit_l2
                         curr_case["applicant_name"] = applicant_name
@@ -861,6 +879,7 @@ else:
     # ----------------- 後台 TAB 2: 承辦人代為上傳 -----------------
     with tab2:
         st.markdown('<div class="section-title">📤 承辦人代為上傳申請文件與 AI 解析</div>', unsafe_allow_html=True)
+        admin_upload_scholarship_type = st.selectbox("0. 選擇獎學金類別：", get_scholarship_types(), key="admin_up_type")
         col_sel_l1, col_sel_l2 = st.columns(2)
         with col_sel_l1:
             admin_upload_l1 = st.selectbox("1. 選擇大隊 / 局本部：", get_level1_units(), key="admin_up_l1")
@@ -887,6 +906,7 @@ else:
                 case_id = f"TTFD-2026-{len(st.session_state.records)+1:03d}"
                 new_c = {
                     "id": case_id,
+                    "scholarship_type": admin_upload_scholarship_type,
                     "unit_level1": admin_upload_l1,
                     "unit_level2": admin_upload_l2,
                     "applicant_name": ai_res.get("applicant_name", ""),
@@ -937,6 +957,7 @@ else:
                 table_rows.append({
                     "序號": idx,
                     "案件編號": r.get("id", ""),
+                    "獎學金類別": r.get("scholarship_type", "未分類"),
                     "大隊 / 局本部": r.get("unit_level1", "未指定"),
                     "分隊 / 科室": r.get("unit_level2", "未指定"),
                     "申請人姓名": r.get("applicant_name", ""),
@@ -953,7 +974,11 @@ else:
             df = pd.DataFrame(table_rows)
             
             # 多維度篩選
-            col_flt1, col_flt2, col_flt3 = st.columns(3)
+            col_flt0, col_flt1, col_flt2, col_flt3 = st.columns(4)
+            with col_flt0:
+                # 含「未分類」選項，避免舊資料 (更新前無獎學金類別欄位) 被篩選條件預設隱藏
+                type_options = list(dict.fromkeys(get_scholarship_types() + list(df["獎學金類別"].unique())))
+                type_filter = st.multiselect("依獎學金類別篩選：", type_options, default=type_options, key="admin_flt_type")
             with col_flt1:
                 all_l1 = ["全部"] + list(df["大隊 / 局本部"].unique())
                 filter_l1 = st.selectbox("依大隊/局本部篩選：", all_l1, key="admin_flt_l1")
@@ -961,8 +986,8 @@ else:
                 status_filter = st.multiselect("依審核結果篩選：", ["符合資格", "待補件", "不符資格"], default=["符合資格", "待補件", "不符資格"], key="admin_flt_stat")
             with col_flt3:
                 cat_filter = st.multiselect("依組別篩選：", ["大專院校", "高中職", "國中", "國小"], default=["大專院校", "高中職", "國中", "國小"], key="admin_flt_cat")
-                
-            filtered_df = df[df["審核結果"].isin(status_filter) & df["組別"].isin(cat_filter)]
+
+            filtered_df = df[df["獎學金類別"].isin(type_filter) & df["審核結果"].isin(status_filter) & df["組別"].isin(cat_filter)]
             if filter_l1 != "全部":
                 filtered_df = filtered_df[filtered_df["大隊 / 局本部"] == filter_l1]
                 
@@ -971,6 +996,7 @@ else:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    "獎學金類別": st.column_config.TextColumn("獎學金類別", width="medium"),
                     "大隊 / 局本部": st.column_config.TextColumn("大隊/局本部", width="medium"),
                     "分隊 / 科室": st.column_config.TextColumn("分隊/科室", width="medium"),
                     "審核結果": st.column_config.TextColumn("審核結果", help="符合資格: GPA >= 80 且無缺件"),
@@ -1012,6 +1038,7 @@ else:
                   - 原始照片：`./uploads/`
                   - 數據總表：`./data/獎學金總表.xlsx`
                 - **清冊欄位**：完整 14 欄（含案件編號、雙階層組織、5項檢核、簽章）
+                - **分頁方式**：Excel 依「獎學金類別」自動分開為獨立工作表（義消聯合總會獎助學金 / 本局津芳冰城陳慶銳先生獎學金）
                 - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片
                 """)
                 
@@ -1059,5 +1086,9 @@ else:
                     1. 建立一個新的 [Google 試算表](https://sheets.new)。
                     2. 點擊上方選單 **「擴充功能」 $\\rightarrow$ 「Apps Script」**。
                     3. 貼上標準同步腳本並發布為 **「網路應用程式」** (所有人可存取)。
+
+                    ⚠️ 若您先前已部署過舊版腳本，請改貼下方最新版程式碼並**重新部署**，
+                    同步後會依「獎學金類別」自動分別建立 **義消聯合總會獎助學金** 與
+                    **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
                     """)
                     st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
