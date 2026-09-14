@@ -1008,13 +1008,23 @@ else:
             col_e1, col_e2 = st.columns([1.5, 1])
             with col_e1:
                 st.markdown("##### 📥 匯出標準格式 Excel 審核清冊")
-                excel_bytes = export_scholarship_excel(st.session_state.records)
+
+                # 匯出內容跟著畫面篩選走：只匯出目前篩選條件下、畫面上看得到的案件，
+                # 避免大隊承辦人下載後誤以為只有自己大隊卻夾帶了其他大隊的個資。
+                matched_ids = set(filtered_df["案件編號"])
+                filtered_records = [r for r in st.session_state.records if r.get("id", "") in matched_ids]
+
+                scope_label = filter_l1 if filter_l1 != "全部" else "全局"
+                safe_scope = scope_label.replace("/", "_").replace(" ", "")
+                st.caption(f"📌 目前匯出範圍：**{scope_label}**（依畫面篩選條件，共 {len(filtered_records)} 筆）")
+
+                excel_bytes = export_scholarship_excel(filtered_records)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                
+
                 st.download_button(
                     label="📥 立即下載 Excel 審核總表 (.xlsx)",
                     data=excel_bytes,
-                    file_name=f"臺東縣消防局_消防及義消子女獎學金審核名冊_{timestamp}.xlsx",
+                    file_name=f"臺東縣消防局_消防及義消子女獎學金審核名冊_{safe_scope}_{timestamp}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     type="primary"
@@ -1039,7 +1049,8 @@ else:
                   - 數據總表：`./data/獎學金總表.xlsx`
                 - **清冊欄位**：完整 14 欄（含案件編號、雙階層組織、5項檢核、簽章）
                 - **分頁方式**：Excel 依「獎學金類別」自動分開為獨立工作表（義消聯合總會獎助學金 / 本局津芳冰城陳慶銳先生獎學金）
-                - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片
+                - **匯出範圍**：跟著上方篩選條件走，選哪個大隊就只匯出該大隊的資料，避免夾帶其他大隊個資
+                - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片（此項不受篩選影響，固定為全部）
                 """)
                 
             st.markdown("---")
