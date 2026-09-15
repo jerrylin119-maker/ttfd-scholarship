@@ -5,6 +5,7 @@
 
 import os
 import io
+import re
 import time
 import socket
 from datetime import datetime
@@ -192,8 +193,25 @@ def process_uploaded_file(file) -> list[tuple[Image.Image, str]]:
     else:
         img = Image.open(file)
         results.append((img, filename))
-        
+
     return results
+
+def generate_case_id() -> str:
+    """
+    產生簡化版案件編號：{民國年}-{序號}，如 115-01、115-02...
+    序號依當年度已存在的案件編號自動接續編下去（與其他年度或舊格式編號互不影響）。
+    """
+    roc_year = datetime.now().year - 1911
+    prefix = f"{roc_year}-"
+    pattern = re.compile(rf"^{roc_year}-(\d+)$")
+
+    max_seq = 0
+    for r in st.session_state.records:
+        m = pattern.match(str(r.get("id", "")))
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+
+    return f"{prefix}{max_seq + 1:02d}"
 
 SECRETS_FILE = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 DEFAULT_ADMIN_PASSWORD = "ttfd888"
@@ -629,7 +647,7 @@ if not st.session_state.is_admin:
                     
                     progress_bar.progress(75, text="正在比對審查標準與 5 項必備附件...")
                     
-                    new_case_id = f"TTFD-2026-{len(st.session_state.records)+1:03d}"
+                    new_case_id = generate_case_id()
                     
                     new_case = {
                         "id": new_case_id,
@@ -903,7 +921,7 @@ else:
                     
             with st.spinner("AI 解析並存檔中..."):
                 ai_res = analyze_scholarship_documents(admin_imgs, st.session_state.api_key, "gemini-3.6-flash")
-                case_id = f"TTFD-2026-{len(st.session_state.records)+1:03d}"
+                case_id = generate_case_id()
                 new_c = {
                     "id": case_id,
                     "scholarship_type": admin_upload_scholarship_type,
