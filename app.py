@@ -26,6 +26,9 @@ importlib.reload(storage_manager)
 from storage_manager import (
     save_case_to_storage,
     load_stored_cases,
+    load_records_json,
+    load_all_known_case_ids,
+    delete_cases_from_storage,
     package_uploads_zip,
     EXCEL_FILE,
     UPLOADS_DIR,
@@ -33,7 +36,6 @@ from storage_manager import (
 )
 
 from org_structure import TAITUNG_FIRE_ORG, get_level1_units, get_level2_units, get_scholarship_types
-from mock_data import get_mock_cases
 from gemini_analyzer import (
     analyze_scholarship_documents,
     evaluate_eligibility,
@@ -196,6 +198,13 @@ def process_uploaded_file(file) -> list[tuple[Image.Image, str]]:
 
     return results
 
+def sync_latest_to_google_sheets(webhook_url: str):
+    """以 ./data/records.json 內最新、最完整的資料同步雲端試算表 (不使用可能過期的畫面暫存)"""
+    latest = load_records_json()
+    if not latest:
+        return False, "目前系統內沒有任何案件資料，為避免清空雲端試算表，已略過同步"
+    return sync_to_google_sheets(webhook_url, latest)
+
 def generate_case_id() -> str:
     """
     產生簡化版案件編號：{民國年}-{序號}，如 115-01、115-02...
@@ -206,8 +215,11 @@ def generate_case_id() -> str:
     pattern = re.compile(rf"^{roc_year}-(\d+)$")
 
     max_seq = 0
-    for r in st.session_state.records:
-        m = pattern.match(str(r.get("id", "")))
+    # 同時參考檔案內最新資料、刪除前備份與目前畫面資料：避免多人同時送件時編號重複，
+    # 也避免已刪除案件的編號被重複使用 (紙本申請表上已註記該編號)
+    known_ids = load_all_known_case_ids() + [str(r.get("id", "")) for r in st.session_state.records]
+    for cid in known_ids:
+        m = pattern.match(cid)
         if m:
             max_seq = max(max_seq, int(m.group(1)))
 
@@ -310,8 +322,7 @@ except Exception:
 
 # 初始化 Session State (優先從 ./data/records.json 載入歷史儲存紀錄)
 if "records" not in st.session_state:
-    stored = load_stored_cases()
-    st.session_state.records = stored if stored else get_mock_cases()
+    st.session_state.records = load_stored_cases()
 
 if "google_sheet_webhook" not in st.session_state:
     st.session_state.google_sheet_webhook = load_persistent_webhook()
@@ -409,43 +420,8 @@ with st.sidebar:
         active_model_name = model_choice.split(" ")[0]
         
         st.markdown("---")
-        st.subheader("⚡ 測試與資料管理")
-        with st.expander("🛠️ 測試資料重置工具", expanded=True):
-            st.caption("💡 **安全說明**：此清空按鈕僅會清空網頁暫存與本地測試照片，**絕不會刪除或影響 Google 雲端試算表上的任何紀錄**！")
-            if st.button("🗑️ 清空網頁與測試資料 (保留 Google 雲端)", use_container_width=True):
-                st.session_state.records = []
-                st.session_state.selected_case_id = None
-                st.session_state.last_submitted_case = None
-                st.session_state.camera_photos = []
-                
-                # 清理本地 records.json 與 Excel
-                for f_name in ["records.json", "獎學金總表.xlsx"]:
-                    f_p = os.path.join(DATA_DIR, f_name)
-                    if os.path.exists(f_p):
-                        try:
-                            os.remove(f_p)
-                        except Exception:
-                            pass
-                            
-                # 清理 uploads 照片
-                if os.path.exists(UPLOADS_DIR):
-                    try:
-                        for fn in os.listdir(UPLOADS_DIR):
-                            fp = os.path.join(UPLOADS_DIR, fn)
-                            if os.path.isfile(fp):
-                                os.remove(fp)
-                    except Exception:
-                        pass
-                        
-                st.success("✅ 已清空網頁與測試暫存！您的 Google 雲端試算表資料完好保留。")
-                st.rerun()
-                
-            if st.button("🔄 重新載入 4 筆擬真示範案件", use_container_width=True):
-                st.session_state.records = get_mock_cases()
-                if st.session_state.records:
-                    st.session_state.selected_case_id = st.session_state.records[0]["id"]
-                st.success("已載入臺東縣消防局 4 筆擬真示範案例！")
-                st.rerun()
+        st.subheader("⚡ 資料管理")
+        st.caption("🗑️ 如需刪除測試或誤送案件，請至「📊 全局審核總表清冊」分頁最下方的「刪除指定案件」，只會刪除您勾選的案件，其餘案件不受影響。")
 
     st.markdown("---")
     st.subheader("📌 審查標準門檻")
@@ -683,7 +659,7 @@ if not st.session_state.is_admin:
                     webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                     if webhook_url:
                         try:
-                            ok_sync, sync_msg = sync_to_google_sheets(webhook_url, st.session_state.records)
+                            ok_sync, sync_msg = sync_latest_to_google_sheets(webhook_url)
                         except Exception:
                             pass
                             
@@ -1102,7 +1078,7 @@ else:
                             st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
                         else:
                             with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
-                                success, msg = sync_to_google_sheets(webhook_url, st.session_state.records)
+                                success, msg = sync_latest_to_google_sheets(webhook_url)
                                 if success:
                                     st.success(f"🎉 {msg}")
                                 else:
@@ -1121,3 +1097,70 @@ else:
                     **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
                     """)
                     st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
+
+            # ----------------- 刪除指定案件 (測試或誤送資料) -----------------
+            st.markdown("---")
+            st.markdown('<div class="section-title">🗑️ 刪除指定案件（測試或誤送資料）</div>', unsafe_allow_html=True)
+            with st.expander("展開刪除工具（只會刪除您勾選的案件，其餘案件不受影響）", expanded=False):
+                stored_records = load_records_json()
+                del_options = {}
+                for r in stored_records:
+                    del_options[str(r.get("id", ""))] = (
+                        f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
+                        f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
+                        f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
+                        f"送件:{r.get('submitted_at', '—')}"
+                    )
+
+                if st.session_state.get("del_result"):
+                    kind, text = st.session_state.pop("del_result")
+                    (st.success if kind == "ok" else st.error)(text)
+
+                def _do_delete():
+                    ids = list(st.session_state.get("admin_del_select", []))
+                    deleted_ids, msg = delete_cases_from_storage(ids)
+                    if not deleted_ids:
+                        st.session_state["del_result"] = ("err", f"❌ {msg}")
+                        return
+                    # 以檔案內最新資料重新載入畫面，並清除選取狀態
+                    st.session_state.records = load_stored_cases()
+                    if st.session_state.get("selected_case_id") in deleted_ids:
+                        st.session_state.selected_case_id = (
+                            st.session_state.records[0]["id"] if st.session_state.records else None
+                        )
+                    st.session_state["admin_del_select"] = []
+                    st.session_state["admin_del_confirm"] = False
+                    text = f"✅ {msg}（已自動備份刪除前的資料至 ./data/backup/）"
+                    hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                    if hook:
+                        try:
+                            ok_s, msg_s = sync_latest_to_google_sheets(hook)
+                            text += f"　☁️ 雲端試算表：{msg_s}"
+                        except Exception as e:
+                            text += f"　⚠️ 雲端試算表同步失敗，請手動按「立即同步」：{e}"
+                    st.session_state["del_result"] = ("ok", text)
+
+                if not del_options:
+                    st.info("目前沒有可刪除的案件。")
+                else:
+                    st.multiselect(
+                        "請選擇要刪除的案件（可多選）：",
+                        options=list(del_options.keys()),
+                        format_func=lambda cid: del_options[cid],
+                        key="admin_del_select",
+                        placeholder="點選要刪除的測試案件…"
+                    )
+                    picked = st.session_state.get("admin_del_select", [])
+                    if picked:
+                        st.warning(
+                            f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
+                            f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
+                        )
+                        st.checkbox("我已確認上列案件皆為測試或誤送資料，同意永久刪除", key="admin_del_confirm")
+                        st.button(
+                            "🗑️ 確認刪除選取的案件",
+                            type="primary",
+                            disabled=not st.session_state.get("admin_del_confirm", False),
+                            on_click=_do_delete,
+                            use_container_width=True
+                        )

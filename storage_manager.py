@@ -6,6 +6,7 @@
 import os
 import io
 import json
+import shutil
 import zipfile
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
@@ -16,6 +17,7 @@ UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 EXCEL_FILE = os.path.join(DATA_DIR, "獎學金總表.xlsx")
 JSON_FILE = os.path.join(DATA_DIR, "records.json")
+BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
 def ensure_directories():
     """確保 uploads 與 data 資料夾存在"""
@@ -129,3 +131,86 @@ def package_uploads_zip() -> io.BytesIO:
                 z.write(full_path, rel_path)
     zip_buf.seek(0)
     return zip_buf
+
+def load_records_json() -> List[Dict[str, Any]]:
+    """僅讀取 ./data/records.json 的案件資料 (不載入照片)，作為最新、最完整的資料來源"""
+    ensure_directories()
+    if not os.path.exists(JSON_FILE):
+        return []
+    try:
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Error reading records.json: {e}")
+        return []
+
+def delete_cases_from_storage(case_ids: List[str]) -> Tuple[List[str], str]:
+    """
+    依案件編號刪除指定案件；只會動到被指定的編號，其餘案件原封不動。
+    1. 先把整份 records.json 備份到 ./data/backup/
+    2. 從 records.json 移除指定案件 (先寫暫存檔再替換，避免寫到一半中斷而損毀)
+    3. 刪除這些案件的原始照片
+    4. 依剩餘案件重新產生 ./data/獎學金總表.xlsx
+    返回: (實際刪除的案件編號清單, 訊息)
+    """
+    ensure_directories()
+    target_ids = {str(c) for c in case_ids}
+    if not target_ids:
+        return [], "未選取任何案件"
+    if not os.path.exists(JSON_FILE):
+        return [], "找不到案件資料檔，未刪除任何案件"
+
+    try:
+        with open(JSON_FILE, "r", encoding="utf-8") as f:
+            all_records = json.load(f)
+    except Exception as e:
+        return [], f"讀取案件資料檔失敗，未刪除任何案件：{e}"
+
+    to_delete = [r for r in all_records if str(r.get("id", "")) in target_ids]
+    if not to_delete:
+        return [], "選取的案件已不存在，未刪除任何案件"
+    keep = [r for r in all_records if str(r.get("id", "")) not in target_ids]
+
+    # 1. 備份
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    shutil.copyfile(JSON_FILE, os.path.join(BACKUP_DIR, f"records_{stamp}.json"))
+
+    # 2. 寫回剩餘案件
+    tmp_path = JSON_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(keep, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, JSON_FILE)
+
+    # 3. 刪除被刪案件的原始照片 (只刪該案件自己記錄的檔名)
+    for r in to_delete:
+        for fn in r.get("image_paths", []):
+            fp = os.path.join(UPLOADS_DIR, os.path.basename(fn))
+            if os.path.isfile(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+    # 4. 重新產生 Excel 總表
+    try:
+        append_case_to_excel(keep)
+    except Exception as e:
+        print(f"Error regenerating Excel: {e}")
+
+    deleted_ids = [str(r.get("id", "")) for r in to_delete]
+    return deleted_ids, f"已刪除 {len(deleted_ids)} 筆案件，其餘 {len(keep)} 筆案件未受影響"
+
+def load_all_known_case_ids() -> List[str]:
+    """回傳現有案件與所有刪除前備份中出現過的案件編號，讓已刪除的編號不會被重複使用"""
+    ids = [str(r.get("id", "")) for r in load_records_json()]
+    if os.path.isdir(BACKUP_DIR):
+        for fn in os.listdir(BACKUP_DIR):
+            if fn.startswith("records_") and fn.endswith(".json"):
+                try:
+                    with open(os.path.join(BACKUP_DIR, fn), "r", encoding="utf-8") as f:
+                        ids.extend(str(r.get("id", "")) for r in json.load(f))
+                except Exception:
+                    pass
+    return ids
