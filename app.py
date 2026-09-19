@@ -6,6 +6,8 @@
 import os
 import io
 import re
+import hmac
+import hashlib
 import time
 import socket
 from datetime import datetime
@@ -228,6 +230,25 @@ def generate_case_id() -> str:
 SECRETS_FILE = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 DEFAULT_ADMIN_PASSWORD = "ttfd888"
 
+# 「管理員」(可刪除案件) 密碼：因本專案程式碼公開於 GitHub，這裡只存放加鹽雜湊值，不放明碼。
+# 建議另在 Streamlit Cloud 的 Secrets 設定 SUPER_ADMIN_PASSWORD，設定後將優先使用該密碼。
+SUPER_ADMIN_SALT = "ec983ba2e6b1b552851e021e13762f0e"
+SUPER_ADMIN_HASH = "032e9ab341e29c579ca5df5ae2f1e77e650a39a8c9224f66448318d4c01c6717"
+
+def verify_super_admin_password(pwd: str) -> bool:
+    pwd = (pwd or "").strip()
+    if not pwd:
+        return False
+    try:
+        if hasattr(st, "secrets") and "SUPER_ADMIN_PASSWORD" in st.secrets:
+            secret_pwd = str(st.secrets["SUPER_ADMIN_PASSWORD"]).strip()
+            if secret_pwd:
+                return hmac.compare_digest(pwd.encode("utf-8"), secret_pwd.encode("utf-8"))
+    except Exception:
+        pass
+    calc = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), bytes.fromhex(SUPER_ADMIN_SALT), 200000).hex()
+    return hmac.compare_digest(calc, SUPER_ADMIN_HASH)
+
 def load_persistent_api_key() -> str:
     # 1. 優先從 Streamlit Cloud 內建 Secrets 讀取 (支援雲端發布)
     try:
@@ -339,6 +360,9 @@ if "camera_photos" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
+if "super_admin" not in st.session_state:
+    st.session_state.super_admin = False
+
 if "last_submitted_case" not in st.session_state:
     st.session_state.last_submitted_case = None
 
@@ -363,6 +387,7 @@ with st.sidebar:
         st.success("👑 **當前身分：各大隊及業務科 審核管理員**")
         if st.button("🚪 登出審核後台（切換回同仁申請模式）", use_container_width=True):
             st.session_state.is_admin = False
+            st.session_state.super_admin = False
             try:
                 if "admin" in st.query_params:
                     del st.query_params["admin"]
@@ -1102,65 +1127,91 @@ else:
             st.markdown("---")
             st.markdown('<div class="section-title">🗑️ 刪除指定案件（測試或誤送資料）</div>', unsafe_allow_html=True)
             with st.expander("展開刪除工具（只會刪除您勾選的案件，其餘案件不受影響）", expanded=False):
-                stored_records = load_records_json()
-                del_options = {}
-                for r in stored_records:
-                    del_options[str(r.get("id", ""))] = (
-                        f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
-                        f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
-                        f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
-                        f"送件:{r.get('submitted_at', '—')}"
-                    )
-
-                if st.session_state.get("del_result"):
-                    kind, text = st.session_state.pop("del_result")
-                    (st.success if kind == "ok" else st.error)(text)
-
-                def _do_delete():
-                    ids = list(st.session_state.get("admin_del_select", []))
-                    deleted_ids, msg = delete_cases_from_storage(ids)
-                    if not deleted_ids:
-                        st.session_state["del_result"] = ("err", f"❌ {msg}")
+                def _unlock_super_admin():
+                    if st.session_state.get("super_fail", 0) >= 5:
                         return
-                    # 以檔案內最新資料重新載入畫面，並清除選取狀態
-                    st.session_state.records = load_stored_cases()
-                    if st.session_state.get("selected_case_id") in deleted_ids:
-                        st.session_state.selected_case_id = (
-                            st.session_state.records[0]["id"] if st.session_state.records else None
-                        )
-                    st.session_state["admin_del_select"] = []
-                    st.session_state["admin_del_confirm"] = False
-                    text = f"✅ {msg}（已自動備份刪除前的資料至 ./data/backup/）"
-                    hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-                    if hook:
-                        try:
-                            ok_s, msg_s = sync_latest_to_google_sheets(hook)
-                            text += f"　☁️ 雲端試算表：{msg_s}"
-                        except Exception as e:
-                            text += f"　⚠️ 雲端試算表同步失敗，請手動按「立即同步」：{e}"
-                    st.session_state["del_result"] = ("ok", text)
+                    if verify_super_admin_password(st.session_state.get("super_pwd", "")):
+                        st.session_state.super_admin = True
+                        st.session_state.super_fail = 0
+                    else:
+                        st.session_state.super_fail = st.session_state.get("super_fail", 0) + 1
+                    st.session_state["super_pwd"] = ""
 
-                if not del_options:
-                    st.info("目前沒有可刪除的案件。")
+                if not st.session_state.get("super_admin", False):
+                    st.info("🔒 此功能僅限「管理員帳號」使用，請輸入管理員密碼解鎖（一般審核密碼無法使用）。")
+                    if st.session_state.get("super_fail", 0) >= 5:
+                        st.error("❌ 密碼錯誤次數過多，本次連線已鎖定，請重新整理頁面後再試。")
+                    else:
+                        st.text_input("管理員密碼", type="password", key="super_pwd")
+                        st.button("🔓 解鎖刪除功能", on_click=_unlock_super_admin)
+                        if st.session_state.get("super_fail", 0) > 0:
+                            st.error(f"❌ 管理員密碼錯誤（已錯 {st.session_state.super_fail}/5 次）")
                 else:
-                    st.multiselect(
-                        "請選擇要刪除的案件（可多選）：",
-                        options=list(del_options.keys()),
-                        format_func=lambda cid: del_options[cid],
-                        key="admin_del_select",
-                        placeholder="點選要刪除的測試案件…"
-                    )
-                    picked = st.session_state.get("admin_del_select", [])
-                    if picked:
-                        st.warning(
-                            f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
-                            f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
+                    if st.button("🔒 鎖定管理員功能"):
+                        st.session_state.super_admin = False
+                        st.rerun()
+                if st.session_state.get("super_admin", False):
+                    stored_records = load_records_json()
+                    del_options = {}
+                    for r in stored_records:
+                        del_options[str(r.get("id", ""))] = (
+                            f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
+                            f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
+                            f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
+                            f"送件:{r.get('submitted_at', '—')}"
                         )
-                        st.checkbox("我已確認上列案件皆為測試或誤送資料，同意永久刪除", key="admin_del_confirm")
-                        st.button(
-                            "🗑️ 確認刪除選取的案件",
-                            type="primary",
-                            disabled=not st.session_state.get("admin_del_confirm", False),
-                            on_click=_do_delete,
-                            use_container_width=True
+
+                    if st.session_state.get("del_result"):
+                        kind, text = st.session_state.pop("del_result")
+                        (st.success if kind == "ok" else st.error)(text)
+
+                    def _do_delete():
+                        if not st.session_state.get("super_admin", False):
+                            return
+                        ids = list(st.session_state.get("admin_del_select", []))
+                        deleted_ids, msg = delete_cases_from_storage(ids)
+                        if not deleted_ids:
+                            st.session_state["del_result"] = ("err", f"❌ {msg}")
+                            return
+                        # 以檔案內最新資料重新載入畫面，並清除選取狀態
+                        st.session_state.records = load_stored_cases()
+                        if st.session_state.get("selected_case_id") in deleted_ids:
+                            st.session_state.selected_case_id = (
+                                st.session_state.records[0]["id"] if st.session_state.records else None
+                            )
+                        st.session_state["admin_del_select"] = []
+                        st.session_state["admin_del_confirm"] = False
+                        text = f"✅ {msg}（已自動備份刪除前的資料至 ./data/backup/）"
+                        hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                        if hook:
+                            try:
+                                ok_s, msg_s = sync_latest_to_google_sheets(hook)
+                                text += f"　☁️ 雲端試算表：{msg_s}"
+                            except Exception as e:
+                                text += f"　⚠️ 雲端試算表同步失敗，請手動按「立即同步」：{e}"
+                        st.session_state["del_result"] = ("ok", text)
+
+                    if not del_options:
+                        st.info("目前沒有可刪除的案件。")
+                    else:
+                        st.multiselect(
+                            "請選擇要刪除的案件（可多選）：",
+                            options=list(del_options.keys()),
+                            format_func=lambda cid: del_options[cid],
+                            key="admin_del_select",
+                            placeholder="點選要刪除的測試案件…"
                         )
+                        picked = st.session_state.get("admin_del_select", [])
+                        if picked:
+                            st.warning(
+                                f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
+                                f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
+                            )
+                            st.checkbox("我已確認上列案件皆為測試或誤送資料，同意永久刪除", key="admin_del_confirm")
+                            st.button(
+                                "🗑️ 確認刪除選取的案件",
+                                type="primary",
+                                disabled=not st.session_state.get("admin_del_confirm", False),
+                                on_click=_do_delete,
+                                use_container_width=True
+                            )
