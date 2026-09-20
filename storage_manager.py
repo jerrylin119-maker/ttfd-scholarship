@@ -6,10 +6,11 @@
 import os
 import io
 import json
+import re
 import shutil
 import zipfile
 from datetime import datetime
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from PIL import Image
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +19,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 EXCEL_FILE = os.path.join(DATA_DIR, "獎學金總表.xlsx")
 JSON_FILE = os.path.join(DATA_DIR, "records.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
+DELETE_LOG_FILE = os.path.join(DATA_DIR, "delete_log.json")
 
 def ensure_directories():
     """確保 uploads 與 data 資料夾存在"""
@@ -119,13 +121,16 @@ def load_stored_cases() -> List[Dict[str, Any]]:
         print(f"Error loading stored cases: {e}")
         return []
 
-def package_uploads_zip() -> io.BytesIO:
-    """將整個 ./uploads/ 目錄打包為 zip 檔案供承辦人下載"""
+def package_uploads_zip(only_files=None) -> io.BytesIO:
+    """將 ./uploads/ 目錄打包為 zip 檔案供承辦人下載；only_files 有指定時，只打包這些檔名 (用於各大隊只下載自己的照片)"""
+    only = None if only_files is None else {os.path.basename(str(f)) for f in only_files}
     ensure_directories()
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(UPLOADS_DIR):
             for file in files:
+                if only is not None and file not in only:
+                    continue
                 full_path = os.path.join(root, file)
                 rel_path = os.path.relpath(full_path, UPLOADS_DIR)
                 z.write(full_path, rel_path)
@@ -145,13 +150,16 @@ def load_records_json() -> List[Dict[str, Any]]:
         print(f"Error reading records.json: {e}")
         return []
 
-def delete_cases_from_storage(case_ids: List[str]) -> Tuple[List[str], str]:
+def delete_cases_from_storage(case_ids: List[str], allowed_unit: Optional[str] = None,
+                              actor: str = "") -> Tuple[List[str], str]:
     """
     依案件編號刪除指定案件；只會動到被指定的編號，其餘案件原封不動。
     1. 先把整份 records.json 備份到 ./data/backup/
     2. 從 records.json 移除指定案件 (先寫暫存檔再替換，避免寫到一半中斷而損毀)
     3. 刪除這些案件的原始照片
     4. 依剩餘案件重新產生 ./data/獎學金總表.xlsx
+    allowed_unit: 若指定 (例如某大隊承辦人)，則只允許刪除該大隊的案件，其他大隊案件即使被選取也不會刪除。
+    actor: 執行刪除的帳號 (記錄於刪除紀錄)。
     返回: (實際刪除的案件編號清單, 訊息)
     """
     ensure_directories()
@@ -167,10 +175,14 @@ def delete_cases_from_storage(case_ids: List[str]) -> Tuple[List[str], str]:
     except Exception as e:
         return [], f"讀取案件資料檔失敗，未刪除任何案件：{e}"
 
-    to_delete = [r for r in all_records if str(r.get("id", "")) in target_ids]
+    def _allowed(r):
+        return allowed_unit is None or r.get("unit_level1") == allowed_unit
+
+    to_delete = [r for r in all_records if str(r.get("id", "")) in target_ids and _allowed(r)]
     if not to_delete:
-        return [], "選取的案件已不存在，未刪除任何案件"
-    keep = [r for r in all_records if str(r.get("id", "")) not in target_ids]
+        return [], "選取的案件不存在，或不屬於您可管理的單位，未刪除任何案件"
+    delete_ids = {str(r.get("id", "")) for r in to_delete}
+    keep = [r for r in all_records if str(r.get("id", "")) not in delete_ids]
 
     # 1. 備份
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -193,6 +205,26 @@ def delete_cases_from_storage(case_ids: List[str]) -> Tuple[List[str], str]:
                 except Exception:
                     pass
 
+    # 3.5 記錄刪除紀錄 (誰、何時、刪了哪一件)
+    try:
+        log = []
+        if os.path.exists(DELETE_LOG_FILE):
+            with open(DELETE_LOG_FILE, "r", encoding="utf-8") as f:
+                log = json.load(f)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for r in to_delete:
+            log.append({
+                "time": now_str, "by": actor or "未記錄",
+                "id": r.get("id", ""), "scholarship_type": r.get("scholarship_type", ""),
+                "unit_level1": r.get("unit_level1", ""), "unit_level2": r.get("unit_level2", ""),
+                "applicant_name": r.get("applicant_name", ""), "child_name": r.get("child_name", ""),
+                "submitted_at": r.get("submitted_at", ""),
+            })
+        with open(DELETE_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error writing delete log: {e}")
+
     # 4. 重新產生 Excel 總表
     try:
         append_case_to_excel(keep)
@@ -214,3 +246,38 @@ def load_all_known_case_ids() -> List[str]:
                 except Exception:
                     pass
     return ids
+
+def _norm(v: Any) -> str:
+    return re.sub(r"\s+", "", str(v or "")).lower()
+
+def case_dup_keys(r: Dict[str, Any]) -> List[tuple]:
+    """回傳可用來判斷「同一件申請」的識別鍵：(獎學金類別, 子女姓名, 家長姓名) 或 (類別, 子女姓名, 家長身分證)"""
+    t, child = _norm(r.get("scholarship_type")), _norm(r.get("child_name"))
+    if not child:
+        return []
+    keys = []
+    if _norm(r.get("applicant_name")):
+        keys.append((t, child, "name", _norm(r.get("applicant_name"))))
+    if _norm(r.get("applicant_id")):
+        keys.append((t, child, "id", _norm(r.get("applicant_id"))))
+    return keys
+
+def find_duplicate_cases(new_case: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """在已存檔案件中，找出與 new_case 疑似為同一件申請的案件 (同類別、同子女，且家長姓名或身分證相同)"""
+    new_keys = set(case_dup_keys(new_case))
+    if not new_keys:
+        return []
+    return [r for r in load_records_json() if new_keys & set(case_dup_keys(r))]
+
+def load_delete_log(unit: Optional[str] = None) -> List[Dict[str, Any]]:
+    """讀取刪除紀錄 (最新的在前)；指定 unit 時只回傳該大隊的紀錄"""
+    if not os.path.exists(DELETE_LOG_FILE):
+        return []
+    try:
+        with open(DELETE_LOG_FILE, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    except Exception:
+        return []
+    if unit:
+        log = [x for x in log if x.get("unit_level1") == unit]
+    return list(reversed(log))

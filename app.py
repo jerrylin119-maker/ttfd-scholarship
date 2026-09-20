@@ -29,6 +29,10 @@ from storage_manager import (
     save_case_to_storage,
     load_stored_cases,
     load_records_json,
+    load_delete_log,
+    find_duplicate_cases,
+    case_dup_keys,
+    JSON_FILE,
     load_all_known_case_ids,
     delete_cases_from_storage,
     package_uploads_zip,
@@ -200,6 +204,43 @@ def process_uploaded_file(file) -> list[tuple[Image.Image, str]]:
 
     return results
 
+def build_new_case(ai_result, images, labels, stype, l1, l2) -> dict:
+    return {
+        "id": generate_case_id(),
+        "scholarship_type": stype,
+        "unit_level1": l1,
+        "unit_level2": l2,
+        "applicant_name": ai_result.get("applicant_name", ""),
+        "applicant_id": ai_result.get("applicant_id", ""),
+        "child_name": ai_result.get("child_name", ""),
+        "category": ai_result.get("category", "大專院校"),
+        "semester_gpa": ai_result.get("semester_gpa"),
+        "conduct": ai_result.get("conduct", ""),
+        "attachments": ai_result.get("attachments", {}),
+        "review_status": ai_result.get("review_status", "待審核"),
+        "review_reason": ai_result.get("review_reason", ""),
+        "is_eligible": ai_result.get("is_eligible", False),
+        "notes": ai_result.get("notes", ""),
+        "images": images,
+        "image_labels": labels,
+        "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def finalize_submission(new_case: dict):
+    """存檔 → 更新畫面狀態 → 自動同步雲端試算表"""
+    save_case_to_storage(new_case)
+    st.session_state.records.append(new_case)
+    st.session_state.selected_case_id = new_case["id"]
+    st.session_state.last_submitted_case = new_case
+    st.session_state.pending_submission = None
+    st.session_state.camera_photos = []
+    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+    if webhook_url:
+        try:
+            sync_latest_to_google_sheets(webhook_url)
+        except Exception:
+            pass
+
 def sync_latest_to_google_sheets(webhook_url: str):
     """以 ./data/records.json 內最新、最完整的資料同步雲端試算表 (不使用可能過期的畫面暫存)"""
     latest = load_records_json()
@@ -230,24 +271,104 @@ def generate_case_id() -> str:
 SECRETS_FILE = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 DEFAULT_ADMIN_PASSWORD = "ttfd888"
 
-# 「管理員」(可刪除案件) 密碼：因本專案程式碼公開於 GitHub，這裡只存放加鹽雜湊值，不放明碼。
-# 建議另在 Streamlit Cloud 的 Secrets 設定 SUPER_ADMIN_PASSWORD，設定後將優先使用該密碼。
+# ---------------------------------------------------------------------
+# 帳號與權限：各大隊各一組帳號 (只看得到、只管理自己大隊的案件) + 業務科帳號 (全部案件)
+# 密碼一律放在 Streamlit Cloud 的 Secrets (本專案程式碼公開於 GitHub，不可把密碼寫在程式碼裡)：
+#   HQ_PASSWORD = "業務科密碼"
+#   [UNIT_PASSWORDS]
+#   "臺東大隊" = "..."   "關山大隊" = "..."   "成功大隊" = "..."   "大武大隊" = "..."
+# 一旦設定了 UNIT_PASSWORDS，舊版共用密碼即自動失效。
+# ---------------------------------------------------------------------
+HQ_UNIT_LABEL = "業務科（民力及訓練科）"
+HQ_LEVEL1_NAME = "局本部及業務科室"
+UNIT_ACCOUNTS = [u for u in get_level1_units() if u != HQ_LEVEL1_NAME]
+
+# 業務科備援密碼：僅存加鹽雜湊值 (未設定 Secrets 時使用)；設定 HQ_PASSWORD 後優先使用 Secrets
 SUPER_ADMIN_SALT = "ec983ba2e6b1b552851e021e13762f0e"
 SUPER_ADMIN_HASH = "032e9ab341e29c579ca5df5ae2f1e77e650a39a8c9224f66448318d4c01c6717"
 
-def verify_super_admin_password(pwd: str) -> bool:
+def _get_secret(name, default=None):
+    try:
+        if hasattr(st, "secrets") and name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return default
+
+def get_unit_passwords() -> dict:
+    raw = _get_secret("UNIT_PASSWORDS")
+    if not raw:
+        return {}
+    try:
+        return {str(k): str(v).strip() for k, v in dict(raw).items() if str(v).strip()}
+    except Exception:
+        return {}
+
+def _safe_equal(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+def verify_hq_password(pwd: str) -> bool:
     pwd = (pwd or "").strip()
     if not pwd:
         return False
-    try:
-        if hasattr(st, "secrets") and "SUPER_ADMIN_PASSWORD" in st.secrets:
-            secret_pwd = str(st.secrets["SUPER_ADMIN_PASSWORD"]).strip()
-            if secret_pwd:
-                return hmac.compare_digest(pwd.encode("utf-8"), secret_pwd.encode("utf-8"))
-    except Exception:
-        pass
+    for key in ("HQ_PASSWORD", "SUPER_ADMIN_PASSWORD"):
+        secret_pwd = str(_get_secret(key, "") or "").strip()
+        if secret_pwd:
+            return _safe_equal(pwd, secret_pwd)
     calc = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), bytes.fromhex(SUPER_ADMIN_SALT), 200000).hex()
     return hmac.compare_digest(calc, SUPER_ADMIN_HASH)
+
+def attempt_login(unit_choice: str, pwd: str):
+    """驗證登入；成功時寫入 role / scope_unit / is_admin。返回 (是否成功, 訊息)"""
+    pwd = (pwd or "").strip()
+    if not pwd:
+        return False, "請輸入密碼"
+    if unit_choice == HQ_UNIT_LABEL:
+        if verify_hq_password(pwd):
+            st.session_state.role, st.session_state.scope_unit = "hq", None
+        elif not get_unit_passwords() and _safe_equal(pwd, DEFAULT_ADMIN_PASSWORD):
+            # 過渡期：尚未設定各大隊密碼時，舊版共用密碼暫時可用 (僅可檢視/複核，不可刪除)
+            st.session_state.role, st.session_state.scope_unit = "legacy", None
+        else:
+            return False, "密碼錯誤"
+    else:
+        expected = get_unit_passwords().get(unit_choice)
+        if not expected:
+            return False, f"{unit_choice} 尚未設定密碼，請洽業務科"
+        if not _safe_equal(pwd, expected):
+            return False, "密碼錯誤"
+        st.session_state.role, st.session_state.scope_unit = "unit", unit_choice
+    st.session_state.is_admin = True
+    return True, "登入成功"
+
+def logout_admin():
+    st.session_state.is_admin = False
+    st.session_state.role = None
+    st.session_state.scope_unit = None
+
+def current_role():
+    return st.session_state.get("role")
+
+def current_scope():
+    """各大隊帳號回傳該大隊名稱；業務科/舊版帳號回傳 None (代表全部)"""
+    return st.session_state.get("scope_unit")
+
+def can_manage_system() -> bool:
+    """API Key、雲端試算表等系統設定：僅業務科與過渡期舊版帳號"""
+    return current_role() in ("hq", "legacy")
+
+def can_delete() -> bool:
+    return current_role() in ("hq", "unit")
+
+def visible(records):
+    """依登入帳號過濾可見案件：各大隊只看得到自己大隊的案件"""
+    scope = current_scope()
+    return [r for r in records if r.get("unit_level1") == scope] if scope else list(records)
+
+def actor_label() -> str:
+    if current_role() == "unit":
+        return f"{current_scope()} 承辦人"
+    return "業務科" if current_role() == "hq" else "舊版共用帳號"
 
 def load_persistent_api_key() -> str:
     # 1. 優先從 Streamlit Cloud 內建 Secrets 讀取 (支援雲端發布)
@@ -333,17 +454,13 @@ def save_persistent_webhook(url: str):
     except Exception:
         pass
 
-# 檢查網址參數是否帶有管理員/審核專用直通金鑰 (如 ?admin=ttfd888)
-try:
-    if "admin" in st.query_params:
-        if st.query_params["admin"] == DEFAULT_ADMIN_PASSWORD:
-            st.session_state.is_admin = True
-except Exception:
-    pass
-
 # 初始化 Session State (優先從 ./data/records.json 載入歷史儲存紀錄)
 if "records" not in st.session_state:
     st.session_state.records = load_stored_cases()
+    try:
+        st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
+    except OSError:
+        st.session_state.records_mtime = None
 
 if "google_sheet_webhook" not in st.session_state:
     st.session_state.google_sheet_webhook = load_persistent_webhook()
@@ -360,8 +477,31 @@ if "camera_photos" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
-if "super_admin" not in st.session_state:
-    st.session_state.super_admin = False
+if "role" not in st.session_state:
+    st.session_state.role = None
+    st.session_state.scope_unit = None
+
+if "login_fail" not in st.session_state:
+    st.session_state.login_fail = 0
+
+if "upload_ver" not in st.session_state:
+    st.session_state.upload_ver = 0
+
+if "pending_submission" not in st.session_state:
+    st.session_state.pending_submission = None
+
+def refresh_records_if_changed():
+    """案件資料檔有變動 (例如其他分隊剛送件) 時，重新載入，讓審核人員看到最新案件"""
+    try:
+        mtime = os.path.getmtime(JSON_FILE)
+    except OSError:
+        mtime = None
+    if st.session_state.get("records_mtime") != mtime:
+        st.session_state.records = load_stored_cases()
+        st.session_state.records_mtime = mtime
+
+if st.session_state.is_admin:
+    refresh_records_if_changed()
 
 if "last_submitted_case" not in st.session_state:
     st.session_state.last_submitted_case = None
@@ -369,84 +509,81 @@ if "last_submitted_case" not in st.session_state:
 # ----------------- 側邊欄 -----------------
 with st.sidebar:
     st.markdown("## 🚒 臺東縣消防局\n### 獎學金申請審核系統")
-    
+
     if not st.session_state.is_admin:
         st.info("📍 **當前身分：申請同仁專區**\n\n(已啟用個資防護，僅可交件)")
-        
+
         with st.expander("🔐 各大隊及業務科 審核人員登入", expanded=False):
-            st.markdown("各大隊、分隊承辦人及業務科同仁請輸入通關密碼以檢視完整清冊與複核：")
-            pwd_input = st.text_input("審核人員密碼", type="password", key="admin_pwd_input")
-            if st.button("🔑 登入審核管理後台", use_container_width=True, type="primary"):
-                if pwd_input == DEFAULT_ADMIN_PASSWORD:
-                    st.session_state.is_admin = True
-                    st.success("✅ 驗證通過，已切換至審核人員模式！")
-                    st.rerun()
-                else:
-                    st.error("❌ 密碼錯誤！請洽業務科獎學金承辦人。")
+            st.markdown("請選擇您的**單位帳號**，並輸入該單位的密碼（各大隊只看得到、也只能管理自己大隊的案件）：")
+            locked = st.session_state.login_fail >= 5
+            if locked:
+                st.error("❌ 密碼錯誤次數過多，本次連線已鎖定，請重新整理頁面後再試。")
+            else:
+                login_unit = st.selectbox("單位帳號", UNIT_ACCOUNTS + [HQ_UNIT_LABEL], key="login_unit")
+                pwd_input = st.text_input("密碼", type="password", key="admin_pwd_input")
+                if st.button("🔑 登入審核管理後台", use_container_width=True, type="primary"):
+                    ok_login, login_msg = attempt_login(login_unit, pwd_input)
+                    if ok_login:
+                        st.session_state.login_fail = 0
+                        st.rerun()
+                    else:
+                        st.session_state.login_fail += 1
+                        st.error(f"❌ {login_msg}！請洽業務科獎學金承辦人。（已錯 {st.session_state.login_fail}/5 次）")
     else:
-        st.success("👑 **當前身分：各大隊及業務科 審核管理員**")
+        role_now = current_role()
+        if role_now == "unit":
+            st.success(f"👑 **當前身分：{current_scope()} 審核承辦人**\n\n僅可檢視、複核、刪除本大隊案件")
+        elif role_now == "hq":
+            st.success("👑 **當前身分：業務科（民力及訓練科）管理員**\n\n可檢視、管理全部案件")
+        else:
+            st.warning("⚠️ **目前使用舊版共用密碼登入**\n\n業務科尚未設定各大隊密碼，此帳號可看到全部案件、但不可刪除。請盡速改用各單位專屬帳號。")
+        if role_now == "hq" and not get_unit_passwords():
+            st.info("ℹ️ 尚未設定各大隊密碼，各大隊帳號目前無法登入。請至 Streamlit Cloud 的 Secrets 設定 UNIT_PASSWORDS（設定後，舊版共用密碼會自動失效）。")
         if st.button("🚪 登出審核後台（切換回同仁申請模式）", use_container_width=True):
-            st.session_state.is_admin = False
-            st.session_state.super_admin = False
-            try:
-                if "admin" in st.query_params:
-                    del st.query_params["admin"]
-            except Exception:
-                pass
+            logout_admin()
             st.rerun()
-            
-        with st.expander("🔗 審核後台專屬直通網址", expanded=False):
-            admin_direct_url = f"https://means-brandon-tip-snap.trycloudflare.com/?admin={DEFAULT_ADMIN_PASSWORD}"
-            st.text_input("專屬直通網址 (可加入書籤)", value=admin_direct_url, help="此網址可直接進入審核後台，免手動輸入密碼")
-            st.caption("提示：各大隊與業務科審核承辦人可將此網址加入書籤。")
-            
-        st.markdown("---")
-        st.subheader("🔑 Google GenAI 設定")
-        
-        has_global_key = bool(load_persistent_api_key())
-        if has_global_key:
-            st.success("✅ 伺服器全域 API Key 已就緒\n\n(全體同仁免輸入)")
-            with st.expander("🔧 更換 / 管理 API Key", expanded=False):
+
+        if can_manage_system():
+            st.markdown("---")
+            st.subheader("🔑 Google GenAI 設定")
+
+            has_global_key = bool(load_persistent_api_key())
+            if has_global_key:
+                st.success("✅ 伺服器全域 API Key 已就緒\n\n(全體同仁免輸入)")
+                with st.expander("🔧 更換 / 管理 API Key", expanded=False):
+                    api_key_input = st.text_input(
+                        "更新 API Key",
+                        value=st.session_state.api_key,
+                        type="password",
+                        help="輸入新的 Google Gemini API Key"
+                    )
+                    if st.button("💾 儲存並套用新金鑰", use_container_width=True):
+                        save_persistent_api_key(api_key_input)
+                        st.session_state.api_key = api_key_input
+                        st.success("已更新全域金鑰！")
+                        st.rerun()
+            else:
                 api_key_input = st.text_input(
-                    "更新 API Key",
+                    "Gemini API Key",
                     value=st.session_state.api_key,
                     type="password",
-                    help="輸入新的 Google Gemini API Key"
+                    help="輸入您的 Google Gemini API Key"
                 )
-                if st.button("💾 儲存並套用新金鑰", use_container_width=True):
-                    save_persistent_api_key(api_key_input)
+                if api_key_input != st.session_state.api_key:
                     st.session_state.api_key = api_key_input
-                    st.success("已更新全域金鑰！")
-                    st.rerun()
-        else:
-            api_key_input = st.text_input(
-                "Gemini API Key",
-                value=st.session_state.api_key,
-                type="password",
-                help="輸入您的 Google Gemini API Key"
-            )
-            if api_key_input != st.session_state.api_key:
-                st.session_state.api_key = api_key_input
-                
-            if st.button("💾 儲存為全域金鑰 (全體免再輸入)", use_container_width=True):
-                if api_key_input:
-                    save_persistent_api_key(api_key_input)
-                    st.session_state.api_key = api_key_input
-                    st.success("已儲存為全域金鑰！全體同仁的手機與電腦均免再輸入。")
-                    st.rerun()
-                else:
-                    st.error("請先輸入有效的 API Key！")
-                    
-        model_choice = st.selectbox(
-            "AI 視覺辨識模型",
-            ["gemini-3.6-flash (最新推薦)", "gemini-3.5-flash", "gemini-3.6-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"],
-            index=0
-        )
-        active_model_name = model_choice.split(" ")[0]
-        
+
+                if st.button("💾 儲存為全域金鑰 (全體免再輸入)", use_container_width=True):
+                    if api_key_input:
+                        save_persistent_api_key(api_key_input)
+                        st.session_state.api_key = api_key_input
+                        st.success("已儲存為全域金鑰！全體同仁的手機與電腦均免再輸入。")
+                        st.rerun()
+                    else:
+                        st.error("請先輸入有效的 API Key！")
+
         st.markdown("---")
         st.subheader("⚡ 資料管理")
-        st.caption("🗑️ 如需刪除測試或誤送案件，請至「📊 全局審核總表清冊」分頁最下方的「刪除指定案件」，只會刪除您勾選的案件，其餘案件不受影響。")
+        st.caption("🗑️ 如有重複或誤送的案件，請至「📊 全局審核總表清冊」分頁最下方的「刪除指定案件」，只會刪除您勾選的案件，其餘案件不受影響。")
 
     st.markdown("---")
     st.subheader("📌 審查標準門檻")
@@ -531,9 +668,38 @@ if not st.session_state.is_admin:
         
         if st.button("✨ 繼續提交下一筆申請案件", use_container_width=True):
             st.session_state.last_submitted_case = None
+            st.session_state.upload_ver += 1  # 換一個全新的上傳欄位，避免同一批檔案被誤送第二次
             st.rerun()
             
-        st.markdown("---")
+        # 已成功送出：只顯示收執聯，隱藏上傳表單，避免同仁以為沒送出而重複上傳
+        st.info("✅ 本案已成功送出並存檔，**請勿重複上傳**。如需送下一筆，請按上方「繼續提交下一筆申請案件」。")
+        st.stop()
+
+    # 疑似重複送件：先請同仁確認，避免同一案件重複出現
+    pend = st.session_state.pending_submission
+    if pend:
+        st.warning("⚠️ **這件申請看起來已經送出過了！** 請先確認，避免重複上傳。")
+        for d in pend["dups"]:
+            st.markdown(
+                f"- 已存在案件編號 **{d.get('id')}**｜{d.get('scholarship_type', '')}｜"
+                f"{d.get('unit_level1', '')}/{d.get('unit_level2', '')}｜"
+                f"家長：{d.get('applicant_name') or '—'}｜子女：{d.get('child_name') or '—'}｜"
+                f"送件時間：{d.get('submitted_at', '—')}｜狀態：{d.get('review_status', '—')}"
+            )
+        st.caption("若您是為了「補件或更正資料」而重新送件，請按「仍要送出」，並通知大隊承辦人刪除舊的案件；若只是重複上傳，請按「取消」。")
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            if st.button("✅ 這是補件／更正，仍要送出", use_container_width=True, type="primary", key="pend_confirm"):
+                new_case = build_new_case(pend["ai_result"], pend["images"], pend["labels"], pend["type"], pend["l1"], pend["l2"])
+                finalize_submission(new_case)
+                st.balloons()
+                st.rerun()
+        with col_p2:
+            if st.button("❌ 取消，不重複送出", use_container_width=True, key="pend_cancel"):
+                st.session_state.pending_submission = None
+                st.session_state.upload_ver += 1
+                st.rerun()
+        st.stop()
 
     # 申請交件表單區
     st.markdown('<div class="section-title">📤 線上申請交件與照片上傳</div>', unsafe_allow_html=True)
@@ -572,7 +738,7 @@ if not st.session_state.is_admin:
                 "請選取申請表、成績單與證明文件 (支援 PDF, JPG, PNG, WEBP)：",
                 type=["pdf", "jpg", "jpeg", "png", "webp"],
                 accept_multiple_files=True,
-                key="pub_scholarship_uploader"
+                key=f"pub_scholarship_uploader_{st.session_state.upload_ver}"
             )
             
         with col_u2:
@@ -595,7 +761,7 @@ if not st.session_state.is_admin:
     else:  # 即時相機拍照模式
         col_c1, col_c2 = st.columns([1.2, 0.8])
         with col_c1:
-            camera_file = st.camera_input("📷 請將鏡頭對準申請文件拍照：")
+            camera_file = st.camera_input("📷 請將鏡頭對準申請文件拍照：", key=f"pub_camera_{st.session_state.upload_ver}")
             if camera_file is not None:
                 cam_img = Image.open(camera_file)
                 if st.button("➕ 將此照片加入交件清單", use_container_width=True, key="pub_cam_add"):
@@ -648,51 +814,34 @@ if not st.session_state.is_admin:
                     
                     progress_bar.progress(75, text="正在比對審查標準與 5 項必備附件...")
                     
-                    new_case_id = generate_case_id()
-                    
-                    new_case = {
-                        "id": new_case_id,
+                    probe_case = {
                         "scholarship_type": upload_scholarship_type,
-                        "unit_level1": upload_level1,
-                        "unit_level2": upload_level2,
                         "applicant_name": ai_result.get("applicant_name", ""),
                         "applicant_id": ai_result.get("applicant_id", ""),
                         "child_name": ai_result.get("child_name", ""),
-                        "category": ai_result.get("category", "大專院校"),
-                        "semester_gpa": ai_result.get("semester_gpa"),
-                        "conduct": ai_result.get("conduct", ""),
-                        "attachments": ai_result.get("attachments", {}),
-                        "review_status": ai_result.get("review_status", "待審核"),
-                        "review_reason": ai_result.get("review_reason", ""),
-                        "is_eligible": ai_result.get("is_eligible", False),
-                        "notes": ai_result.get("notes", ""),
-                        "images": all_prepared_images,
-                        "image_labels": all_prepared_labels,
-                        "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
-                    
-                    # 💾 自動存入 ./uploads/ 與追加寫入 ./data/獎學金總表.xlsx
-                    progress_bar.progress(90, text="正在儲存原始照片至 ./uploads/ 並追加至總表 Excel...")
-                    save_case_to_storage(new_case)
-                    
-                    st.session_state.records.append(new_case)
-                    st.session_state.selected_case_id = new_case["id"]
-                    st.session_state.last_submitted_case = new_case
-                    st.session_state.camera_photos = []
-                    
-                    # 若有設定 Google Sheets Webhook，同時自動同步雲端試算表
-                    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-                    if webhook_url:
-                        try:
-                            ok_sync, sync_msg = sync_latest_to_google_sheets(webhook_url)
-                        except Exception:
-                            pass
-                            
+                    dups = find_duplicate_cases(probe_case)
+                    if dups:
+                        # 疑似重複：暫不存檔，先請同仁確認
+                        st.session_state.pending_submission = {
+                            "ai_result": ai_result, "images": all_prepared_images, "labels": all_prepared_labels,
+                            "type": upload_scholarship_type, "l1": upload_level1, "l2": upload_level2, "dups": dups,
+                        }
+                        progress_bar.empty()
+                        st.rerun()
+
+                    new_case = build_new_case(ai_result, all_prepared_images, all_prepared_labels,
+                                              upload_scholarship_type, upload_level1, upload_level2)
+
+                    # 💾 自動存入 ./uploads/ 與追加寫入 ./data/獎學金總表.xlsx，並同步雲端試算表
+                    progress_bar.progress(90, text="正在儲存原始照片並同步總表...")
+                    finalize_submission(new_case)
+
                     progress_bar.progress(100, text="✅ 交件成功並已永久存檔！")
                     time.sleep(0.5)
                     st.balloons()
                     st.rerun()
-                    
+
                 except Exception as e:
                     st.error(f"❌ 處理發生錯誤: {str(e)}")
 
@@ -700,14 +849,16 @@ if not st.session_state.is_admin:
 # 模式 B：各大隊及業務科 審核管理後台 (Reviewer / Admin Mode - 完整功能)
 # =========================================================================
 else:
-    st.markdown("""
+    admin_title = f"{current_scope()} 專用" if current_scope() else "業務科專用" if current_role() == "hq" else "各大隊及業務科專用"
+    st.markdown(f"""
     <div class="main-header">
-        <h1>🚒 臺東縣消防局 獎學金審核管理系統【各大隊及業務科專用】</h1>
+        <h1>🚒 臺東縣消防局 獎學金審核管理系統【{admin_title}】</h1>
         <p>管理員後台 ‧ 自動儲存 (./uploads/ & 獎學金總表.xlsx) ‧ 左圖右表人工複核 ‧ Google 雲端試算表即時同步</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    records = st.session_state.records
+
+    my_records = visible(st.session_state.records)   # 各大隊帳號只看得到自己大隊的案件
+    records = my_records
     total_count = len(records)
     eligible_count = sum(1 for r in records if r.get("review_status") == "符合資格")
     pending_count = sum(1 for r in records if r.get("review_status") == "待補件")
@@ -736,14 +887,14 @@ else:
 
     # ----------------- 後台 TAB 1: 左圖右表複核 -----------------
     with tab1:
-        if not st.session_state.records:
+        if not my_records:
             st.info("目前尚無任何案件資料。")
         else:
             case_options = {
                 r["id"]: f"【{r.get('id')}】[{r.get('scholarship_type', '未分類')}] [{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
-                for r in st.session_state.records
+                for r in my_records
             }
-            
+
             if st.session_state.selected_case_id not in case_options:
                 st.session_state.selected_case_id = list(case_options.keys())[0]
                 
@@ -795,24 +946,24 @@ else:
                     type_list = get_scholarship_types()
                     curr_type = curr_case.get("scholarship_type", type_list[0])
                     idx_type = type_list.index(curr_type) if curr_type in type_list else 0
-                    edit_scholarship_type = st.selectbox("獎學金類別", type_list, index=idx_type, key="admin_edit_type")
+                    edit_scholarship_type = st.selectbox("獎學金類別", type_list, index=idx_type, key=f"admin_edit_type_{curr_case['id']}")
 
                     st.markdown("##### 🏢 所屬單位")
                     col_u1, col_u2 = st.columns(2)
                     
-                    level1_list = get_level1_units()
+                    level1_list = [current_scope()] if current_scope() else get_level1_units()
                     curr_l1 = curr_case.get("unit_level1", level1_list[0])
                     idx_l1 = level1_list.index(curr_l1) if curr_l1 in level1_list else 0
                     
                     with col_u1:
-                        edit_l1 = st.selectbox("大隊 / 局本部", level1_list, index=idx_l1, key="admin_edit_l1")
+                        edit_l1 = st.selectbox("大隊 / 局本部", level1_list, index=idx_l1, key=f"admin_edit_l1_{curr_case['id']}")
                     
                     level2_list = get_level2_units(edit_l1)
                     curr_l2 = curr_case.get("unit_level2", level2_list[0] if level2_list else "")
                     idx_l2 = level2_list.index(curr_l2) if curr_l2 in level2_list else 0
                     
                     with col_u2:
-                        edit_l2 = st.selectbox("分隊 / 科室", level2_list, index=idx_l2, key="admin_edit_l2")
+                        edit_l2 = st.selectbox("分隊 / 科室", level2_list, index=idx_l2, key=f"admin_edit_l2_{curr_case['id']}")
                     
                     st.markdown("---")
                     st.markdown("##### 👤 申請人與成績資訊")
@@ -876,7 +1027,7 @@ else:
                     
                     if submit_btn:
                         curr_case["scholarship_type"] = edit_scholarship_type
-                        curr_case["unit_level1"] = edit_l1
+                        curr_case["unit_level1"] = current_scope() or edit_l1
                         curr_case["unit_level2"] = edit_l2
                         curr_case["applicant_name"] = applicant_name
                         curr_case["applicant_id"] = applicant_id
@@ -901,7 +1052,7 @@ else:
         admin_upload_scholarship_type = st.selectbox("0. 選擇獎學金類別：", get_scholarship_types(), key="admin_up_type")
         col_sel_l1, col_sel_l2 = st.columns(2)
         with col_sel_l1:
-            admin_upload_l1 = st.selectbox("1. 選擇大隊 / 局本部：", get_level1_units(), key="admin_up_l1")
+            admin_upload_l1 = st.selectbox("1. 選擇大隊 / 局本部：", [current_scope()] if current_scope() else get_level1_units(), key="admin_up_l1")
         with col_sel_l2:
             admin_l2_choices = get_level2_units(admin_upload_l1)
             admin_upload_l2 = st.selectbox("2. 選擇分隊 / 科室：", admin_l2_choices, key="admin_up_l2")
@@ -953,11 +1104,11 @@ else:
     with tab3:
         st.markdown('<div class="section-title">📊 臺東縣消防局 獎學金審核彙總名冊 (完整個資)</div>', unsafe_allow_html=True)
         
-        if not st.session_state.records:
+        if not my_records:
             st.info("尚無審核紀錄。")
         else:
             table_rows = []
-            for idx, r in enumerate(st.session_state.records, 1):
+            for idx, r in enumerate(my_records, 1):
                 att = r.get("attachments", {})
                 att_keys = [
                     ("application_form", "申請表"),
@@ -1031,7 +1182,7 @@ else:
                 # 匯出內容跟著畫面篩選走：只匯出目前篩選條件下、畫面上看得到的案件，
                 # 避免大隊承辦人下載後誤以為只有自己大隊卻夾帶了其他大隊的個資。
                 matched_ids = set(filtered_df["案件編號"])
-                filtered_records = [r for r in st.session_state.records if r.get("id", "") in matched_ids]
+                filtered_records = [r for r in my_records if r.get("id", "") in matched_ids]
 
                 scope_label = filter_l1 if filter_l1 != "全部" else "全局"
                 safe_scope = scope_label.replace("/", "_").replace(" ", "")
@@ -1051,9 +1202,12 @@ else:
                 
                 # 📦 一鍵下載所有分隊上傳的原始照片壓縮包
                 st.markdown("<br>", unsafe_allow_html=True)
-                zip_bytes = package_uploads_zip()
+                if current_scope():
+                    zip_bytes = package_uploads_zip(only_files=[f for r in my_records for f in r.get("image_paths", [])])
+                else:
+                    zip_bytes = package_uploads_zip()
                 st.download_button(
-                    label="📦 一鍵下載所有分隊上傳原始照片壓縮包 (.zip)",
+                    label=("📦 一鍵下載本大隊分隊上傳原始照片壓縮包 (.zip)" if current_scope() else "📦 一鍵下載所有分隊上傳原始照片壓縮包 (.zip)"),
                     data=zip_bytes,
                     file_name=f"臺東縣消防局_獎學金申請原始檔案打包_{timestamp}.zip",
                     mime="application/zip",
@@ -1069,96 +1223,92 @@ else:
                 - **清冊欄位**：完整 14 欄（含案件編號、雙階層組織、5項檢核、簽章）
                 - **分頁方式**：Excel 依「獎學金類別」自動分開為獨立工作表（義消聯合總會獎助學金 / 本局津芳冰城陳慶銳先生獎學金）
                 - **匯出範圍**：跟著上方篩選條件走，選哪個大隊就只匯出該大隊的資料，避免夾帶其他大隊個資
-                - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片（此項不受篩選影響，固定為全部）
+                - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片（此項不受篩選影響，固定為您可檢視的全部案件）
                 """)
                 
-            st.markdown("---")
-            st.markdown('<div class="section-title">☁️ 雲端試算表 (Google Sheets) 一鍵同步</div>', unsafe_allow_html=True)
-            col_g1, col_g2 = st.columns([1.4, 1.1])
-            with col_g1:
-                webhook_url = st.text_input(
-                    "Google 試算表 Webhook 網址 (Google Apps Script Web App URL)",
-                    value=st.session_state.get("google_sheet_webhook", ""),
-                    help="請貼上您的 Google Apps Script 網路應用程式部署網址 (https://script.google.com/macros/s/.../exec)"
-                )
-                if webhook_url != st.session_state.get("google_sheet_webhook", ""):
-                    save_persistent_webhook(webhook_url)
+            if can_manage_system():
+                st.markdown("---")
+                st.markdown('<div class="section-title">☁️ 雲端試算表 (Google Sheets) 一鍵同步</div>', unsafe_allow_html=True)
+                col_g1, col_g2 = st.columns([1.4, 1.1])
+                with col_g1:
+                    webhook_url = st.text_input(
+                        "Google 試算表 Webhook 網址 (Google Apps Script Web App URL)",
+                        value=st.session_state.get("google_sheet_webhook", ""),
+                        help="請貼上您的 Google Apps Script 網路應用程式部署網址 (https://script.google.com/macros/s/.../exec)"
+                    )
+                    if webhook_url != st.session_state.get("google_sheet_webhook", ""):
+                        save_persistent_webhook(webhook_url)
                     
-                col_btn1, col_btn2 = st.columns(2)
-                with col_btn1:
-                    if st.button("🧪 測試 Webhook 連線", use_container_width=True):
-                        if not webhook_url:
-                            st.warning("請先輸入 Webhook 網址！")
-                        else:
-                            with st.spinner("連線測試中..."):
-                                ok, test_msg = test_webhook_connection(webhook_url)
-                                if ok:
-                                    st.success(test_msg)
-                                else:
-                                    st.error(test_msg)
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        if st.button("🧪 測試 Webhook 連線", use_container_width=True):
+                            if not webhook_url:
+                                st.warning("請先輸入 Webhook 網址！")
+                            else:
+                                with st.spinner("連線測試中..."):
+                                    ok, test_msg = test_webhook_connection(webhook_url)
+                                    if ok:
+                                        st.success(test_msg)
+                                    else:
+                                        st.error(test_msg)
                                     
-                with col_btn2:
-                    if st.button("☁️ 立即同步至 Google 試算表", use_container_width=True, type="primary"):
-                        if not webhook_url:
-                            st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
-                        else:
-                            with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
-                                success, msg = sync_latest_to_google_sheets(webhook_url)
-                                if success:
-                                    st.success(f"🎉 {msg}")
-                                else:
-                                    st.error(f"❌ {msg}")
+                    with col_btn2:
+                        if st.button("☁️ 立即同步至 Google 試算表", use_container_width=True, type="primary"):
+                            if not webhook_url:
+                                st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                            else:
+                                with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
+                                    success, msg = sync_latest_to_google_sheets(webhook_url)
+                                    if success:
+                                        st.success(f"🎉 {msg}")
+                                    else:
+                                        st.error(f"❌ {msg}")
                                 
-            with col_g2:
-                with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
-                    st.markdown("""
-                    **三步驟快速設定 Google 試算表自動同步：**
-                    1. 建立一個新的 [Google 試算表](https://sheets.new)。
-                    2. 點擊上方選單 **「擴充功能」 $\\rightarrow$ 「Apps Script」**。
-                    3. 貼上標準同步腳本並發布為 **「網路應用程式」** (所有人可存取)。
+                with col_g2:
+                    with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
+                        st.markdown("""
+                        **三步驟快速設定 Google 試算表自動同步：**
+                        1. 建立一個新的 [Google 試算表](https://sheets.new)。
+                        2. 點擊上方選單 **「擴充功能」 $\\rightarrow$ 「Apps Script」**。
+                        3. 貼上標準同步腳本並發布為 **「網路應用程式」** (所有人可存取)。
 
-                    ⚠️ 若您先前已部署過舊版腳本，請改貼下方最新版程式碼並**重新部署**，
-                    同步後會依「獎學金類別」自動分別建立 **義消聯合總會獎助學金** 與
-                    **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
-                    """)
-                    st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
+                        ⚠️ 若您先前已部署過舊版腳本，請改貼下方最新版程式碼並**重新部署**，
+                        同步後會依「獎學金類別」自動分別建立 **義消聯合總會獎助學金** 與
+                        **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
+                        """)
+                        st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
 
-            # ----------------- 刪除指定案件 (測試或誤送資料) -----------------
+            # ----------------- 刪除指定案件 (重複或誤送資料) -----------------
             st.markdown("---")
-            st.markdown('<div class="section-title">🗑️ 刪除指定案件（測試或誤送資料）</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">🗑️ 刪除指定案件（重複或誤送資料）</div>', unsafe_allow_html=True)
             with st.expander("展開刪除工具（只會刪除您勾選的案件，其餘案件不受影響）", expanded=False):
-                def _unlock_super_admin():
-                    if st.session_state.get("super_fail", 0) >= 5:
-                        return
-                    if verify_super_admin_password(st.session_state.get("super_pwd", "")):
-                        st.session_state.super_admin = True
-                        st.session_state.super_fail = 0
-                    else:
-                        st.session_state.super_fail = st.session_state.get("super_fail", 0) + 1
-                    st.session_state["super_pwd"] = ""
-
-                if not st.session_state.get("super_admin", False):
-                    st.info("🔒 此功能僅限「管理員帳號」使用，請輸入管理員密碼解鎖（一般審核密碼無法使用）。")
-                    if st.session_state.get("super_fail", 0) >= 5:
-                        st.error("❌ 密碼錯誤次數過多，本次連線已鎖定，請重新整理頁面後再試。")
-                    else:
-                        st.text_input("管理員密碼", type="password", key="super_pwd")
-                        st.button("🔓 解鎖刪除功能", on_click=_unlock_super_admin)
-                        if st.session_state.get("super_fail", 0) > 0:
-                            st.error(f"❌ 管理員密碼錯誤（已錯 {st.session_state.super_fail}/5 次）")
+                if not can_delete():
+                    st.info("🔒 舊版共用密碼帳號沒有刪除權限，請改用「業務科」或「各大隊」專屬帳號登入。")
                 else:
-                    if st.button("🔒 鎖定管理員功能"):
-                        st.session_state.super_admin = False
-                        st.rerun()
-                if st.session_state.get("super_admin", False):
-                    stored_records = load_records_json()
+                    scope_now = current_scope()
+                    stored_records = [r for r in load_records_json() if not scope_now or r.get("unit_level1") == scope_now]
+
+                    # 找出疑似重複的案件 (同類別、同子女、同家長)，在選單上標註，方便挑出重複上傳的那一筆
+                    key_groups = {}
+                    for r in stored_records:
+                        for k in case_dup_keys(r):
+                            key_groups.setdefault(k, set()).add(str(r.get("id", "")))
+
+                    def _dup_mark(r):
+                        me = str(r.get("id", ""))
+                        others = set()
+                        for k in case_dup_keys(r):
+                            others |= key_groups.get(k, set())
+                        others.discard(me)
+                        return f"｜⚠️疑似重複，另有 {'、'.join(sorted(others))}" if others else ""
+
                     del_options = {}
                     for r in stored_records:
                         del_options[str(r.get("id", ""))] = (
                             f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
                             f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
                             f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
-                            f"送件:{r.get('submitted_at', '—')}"
+                            f"送件:{r.get('submitted_at', '—')}｜{r.get('review_status', '—')}" + _dup_mark(r)
                         )
 
                     if st.session_state.get("del_result"):
@@ -1166,40 +1316,45 @@ else:
                         (st.success if kind == "ok" else st.error)(text)
 
                     def _do_delete():
-                        if not st.session_state.get("super_admin", False):
+                        if not can_delete():
                             return
                         ids = list(st.session_state.get("admin_del_select", []))
-                        deleted_ids, msg = delete_cases_from_storage(ids)
+                        deleted_ids, msg = delete_cases_from_storage(ids, allowed_unit=current_scope(), actor=actor_label())
                         if not deleted_ids:
                             st.session_state["del_result"] = ("err", f"❌ {msg}")
                             return
                         # 以檔案內最新資料重新載入畫面，並清除選取狀態
                         st.session_state.records = load_stored_cases()
+                        try:
+                            st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
+                        except OSError:
+                            pass
+                        remain = visible(st.session_state.records)
                         if st.session_state.get("selected_case_id") in deleted_ids:
-                            st.session_state.selected_case_id = (
-                                st.session_state.records[0]["id"] if st.session_state.records else None
-                            )
+                            st.session_state.selected_case_id = remain[0]["id"] if remain else None
                         st.session_state["admin_del_select"] = []
                         st.session_state["admin_del_confirm"] = False
-                        text = f"✅ {msg}（已自動備份刪除前的資料至 ./data/backup/）"
+                        text = f"✅ {msg}（已自動備份刪除前的資料，並記錄於刪除紀錄）"
                         hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                         if hook:
                             try:
                                 ok_s, msg_s = sync_latest_to_google_sheets(hook)
                                 text += f"　☁️ 雲端試算表：{msg_s}"
                             except Exception as e:
-                                text += f"　⚠️ 雲端試算表同步失敗，請手動按「立即同步」：{e}"
+                                text += f"　⚠️ 雲端試算表同步失敗，請洽業務科手動同步：{e}"
                         st.session_state["del_result"] = ("ok", text)
 
                     if not del_options:
                         st.info("目前沒有可刪除的案件。")
                     else:
+                        if scope_now:
+                            st.caption(f"您只能看到、也只能刪除 **{scope_now}** 的案件。")
                         st.multiselect(
                             "請選擇要刪除的案件（可多選）：",
                             options=list(del_options.keys()),
                             format_func=lambda cid: del_options[cid],
                             key="admin_del_select",
-                            placeholder="點選要刪除的測試案件…"
+                            placeholder="點選要刪除的重複／誤送案件…"
                         )
                         picked = st.session_state.get("admin_del_select", [])
                         if picked:
@@ -1207,7 +1362,7 @@ else:
                                 f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
                                 f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
                             )
-                            st.checkbox("我已確認上列案件皆為測試或誤送資料，同意永久刪除", key="admin_del_confirm")
+                            st.checkbox("我已確認上列案件為重複上傳或誤送資料，同意永久刪除", key="admin_del_confirm")
                             st.button(
                                 "🗑️ 確認刪除選取的案件",
                                 type="primary",
@@ -1215,3 +1370,15 @@ else:
                                 on_click=_do_delete,
                                 use_container_width=True
                             )
+
+                    log_rows = load_delete_log(unit=current_scope())
+                    if log_rows:
+                        st.markdown("##### 📜 最近刪除紀錄")
+                        st.dataframe(
+                            pd.DataFrame(log_rows[:30]).rename(columns={
+                                "time": "刪除時間", "by": "執行帳號", "id": "案件編號", "scholarship_type": "獎學金類別",
+                                "unit_level1": "大隊/局本部", "unit_level2": "分隊/科室",
+                                "applicant_name": "家長", "child_name": "子女", "submitted_at": "原送件時間"
+                            }),
+                            use_container_width=True, hide_index=True
+                        )
