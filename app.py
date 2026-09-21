@@ -594,7 +594,7 @@ with st.sidebar:
       2. 學生證或在學證明
       3. 前學期成績證明單
       4. 戶口名簿影本 / 戶籍謄本
-      5. 消防 / 義消服務證明
+      5. 消防 / 義消服務證明（服務證或派令皆可）
     """)
 
 # =========================================================================
@@ -641,7 +641,7 @@ if not st.session_state.is_admin:
             ("student_id_or_enrollment", "2. 學生證或在學證明"),
             ("transcript", "3. 前學期成績證明單"),
             ("household_registration", "4. 戶口名簿影本或戶籍謄本"),
-            ("service_certificate", "5. 消防/義消在職或服務證明")
+            ("service_certificate", "5. 消防/義消在職或服務證明（服務證或派令皆可）")
         ]
         
         att_c1, att_c2 = st.columns(2)
@@ -1000,7 +1000,7 @@ else:
                         chk_trans = st.checkbox("3. 前學期成績證明單", value=att.get("transcript", True))
                     with att_c2:
                         chk_house = st.checkbox("4. 戶口名簿/戶籍謄本", value=att.get("household_registration", True))
-                        chk_service = st.checkbox("5. 消防/義消服務證明", value=att.get("service_certificate", True))
+                        chk_service = st.checkbox("5. 消防/義消服務證明（服務證或派令皆可）", value=att.get("service_certificate", True))
                         
                     notes = st.text_area("審核備註說明", value=curr_case.get("notes", ""), height=80)
                     

@@ -22,12 +22,12 @@ ATTACHMENT_NAMES = {
     "student_id_or_enrollment": "2. 學生證或在學證明",
     "transcript": "3. 前學期成績證明單",
     "household_registration": "4. 戶口名簿影本或戶籍謄本",
-    "service_certificate": "5. 消防/義消在職或服務證明文件"
+    "service_certificate": "5. 消防/義消在職或服務證明文件（服務證或派令皆可）"
 }
 
 SYSTEM_INSTRUCTION = """
 你是一位專業的「消防及義消人員子女獎學金」審查 AI 助理。
-你的任務是從使用者上傳的申請文件照片（可能包含多張：申請表、成績單、學生證、在學證明、戶口名簿、在職或義消服務證明等）中，精確擷取申請資訊，並檢核 5 項必備附件是否存在與齊全。
+你的任務是從使用者上傳的申請文件照片（可能包含多張：申請表、成績單、學生證、在學證明、戶口名簿、在職或義消服務證明、派令等）中，精確擷取申請資訊，並檢核 5 項必備附件是否存在與齊全。
 
 請嚴格依照下列規格輸出 JSON 格式：
 {
@@ -42,7 +42,7 @@ SYSTEM_INSTRUCTION = """
     "student_id_or_enrollment": true, // 是否有包含「學生證」或「在學證明」
     "transcript": true, // 是否有包含「前學期成績證明單」
     "household_registration": true, // 是否有包含「戶口名簿」或「戶籍謄本」
-    "service_certificate": true // 是否有包含「消防員在職證明」或「義消服務證明」
+    "service_certificate": true // 是否有包含「消防員在職證明」、「義消服務證明（服務證）」或「派令」任一種
   },
   "detected_documents": ["申請表", "成績單"], // 識別到的文件名稱清單
   "notes": "備註說明 (例如：成績單蓋有學校戳章、身分證字號清晰、缺在學證明等)"
@@ -53,6 +53,7 @@ SYSTEM_INSTRUCTION = """
 2. 若成績單為五等第制或 GPA (4.0/4.3)，請換算為百分制或直接擷取百分制欄位。
 3. 附件檢查必須客觀根據圖片中實際呈現的文件內容進行判斷。
 4. 請僅輸出符合 JSON 格式的內容，不要包含多餘 Markdown 代碼區塊外的文字。
+5. 第 5 項附件（service_certificate）「服務證」與「派令」皆視為符合：由於部分義消尚未核發服務證，只要圖片中有「服務證」，或有載明申請人（家長）任職／服務於消防局或義消組織的「派令」（含派任令、聘任令、任用令、義消編組派令等公文），任一種即填 true。兩者都沒有才填 false。
 """
 
 def get_client(api_key: Optional[str] = None):
@@ -123,7 +124,7 @@ def analyze_scholarship_documents(
         img_bytes = buffered.getvalue()
         contents.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
     
-    prompt_text = "請詳細檢閱以上上傳之消防/義消子女獎學金申請資料照片，擷取申請人姓名、身分證字號、子女姓名、組別、學期總平均、操行，並逐一檢核 5 項附件（申請表、學生證/在學證明、成績單、戶籍資料、服務證明）。嚴格輸出指定 JSON 結構。"
+    prompt_text = "請詳細檢閱以上上傳之消防/義消子女獎學金申請資料照片，擷取申請人姓名、身分證字號、子女姓名、組別、學期總平均、操行，並逐一檢核 5 項附件（申請表、學生證/在學證明、成績單、戶籍資料、服務證或派令）。嚴格輸出指定 JSON 結構。"
     contents.append(prompt_text)
     
     # 嘗試的模型清單（優先使用指定模型，若 404 則自動依序嘗試其他可用模型）
