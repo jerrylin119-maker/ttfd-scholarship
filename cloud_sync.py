@@ -276,6 +276,7 @@ def fetch_cases_from_google_sheets(webhook_url: str) -> Tuple[bool, Any]:
                 "review_reason": str(row.get("判定理由說明", "") or ""),
                 "is_eligible": status == "符合資格",
                 "notes": f"⚠️ 本案件由雲端試算表復原，原始照片與確切送件時間已遺失。試算表最後同步時間：{sync_time or '未知'}",
+                "review_mode": "paper",  # 復原案件缺少原始照片，一律列為紙本審核
                 "images": [],
                 "image_labels": [],
                 "submitted_at": sync_time or "未知（復原資料）",

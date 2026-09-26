@@ -281,3 +281,24 @@ def load_delete_log(unit: Optional[str] = None) -> List[Dict[str, Any]]:
     if unit:
         log = [x for x in log if x.get("unit_level1") == unit]
     return list(reversed(log))
+
+def mark_all_as_paper_review() -> int:
+    """把目前所有案件標記為紙本審核 (review_mode = "paper")，回傳異動筆數"""
+    ensure_directories()
+    if not os.path.exists(JSON_FILE):
+        return 0
+    with open(JSON_FILE, "r", encoding="utf-8") as f:
+        all_records = json.load(f)
+    changed = 0
+    for r in all_records:
+        if r.get("review_mode") != "paper":
+            r["review_mode"] = "paper"
+            changed += 1
+    if changed:
+        with open(JSON_FILE, "w", encoding="utf-8") as f:
+            json.dump(all_records, f, ensure_ascii=False, indent=2)
+        try:
+            append_case_to_excel(all_records)
+        except Exception as e:
+            print(f"Error regenerating Excel: {e}")
+    return changed

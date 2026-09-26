@@ -30,6 +30,7 @@ from storage_manager import (
     load_stored_cases,
     load_records_json,
     load_delete_log,
+    mark_all_as_paper_review,
     find_duplicate_cases,
     case_dup_keys,
     JSON_FILE,
@@ -226,6 +227,7 @@ def build_new_case(ai_result, images, labels, stype, l1, l2) -> dict:
         "review_reason": ai_result.get("review_reason", ""),
         "is_eligible": ai_result.get("is_eligible", False),
         "notes": ai_result.get("notes", ""),
+        "review_mode": "online",  # 新申請一律先進線上審核；資料遺失須改紙本審核時，由業務科於後台調整
         "images": images,
         "image_labels": labels,
         "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -925,7 +927,10 @@ else:
                 image_labels = curr_case.get("image_labels", [])
                 
                 if not images:
-                    st.warning("⚠️ 此案件無附加圖片檔案。")
+                    if curr_case.get("review_mode") == "online":
+                        st.warning("⚠️ 此案件應為線上審核但無附加圖片檔案，請確認申請人是否已完成線上上傳；如確定改採紙本審核，請於右側「審核方式」調整。")
+                    else:
+                        st.info("📄 本案件已列為**紙本審核**（或為資料復原案件），無需線上附件；請依實際收到的紙本申請表與證明文件核對後，於右側更新審核結果。")
                 else:
                     if len(images) > 1:
                         labels = [image_labels[i] if i < len(image_labels) else f"照片 {i+1}" for i in range(len(images))]
@@ -947,6 +952,14 @@ else:
                 st.markdown('<div class="section-title">✍️ 承辦人審核複核與狀態判定</div>', unsafe_allow_html=True)
                 
                 with st.form(key=f"admin_review_form_{curr_case['id']}"):
+                    st.markdown("##### 📝 審核方式")
+                    mode_list = ["線上審核", "紙本審核"]
+                    curr_mode = "線上審核" if curr_case.get("review_mode") == "online" else "紙本審核"
+                    edit_mode = st.radio(
+                        "審核方式", mode_list, index=mode_list.index(curr_mode), horizontal=True,
+                        key=f"admin_edit_mode_{curr_case['id']}",
+                        help="紙本審核：本案件不需線上附件，依實際收到的紙本文件核對；線上審核：依系統上傳的照片與 AI 擷取結果複核。"
+                    )
                     st.markdown("##### 🏆 獎學金類別")
                     type_list = get_scholarship_types()
                     curr_type = curr_case.get("scholarship_type", type_list[0])
@@ -1031,6 +1044,7 @@ else:
                     submit_btn = st.form_submit_button("💾 儲存並更新審核結果 (同步存檔)", use_container_width=True)
                     
                     if submit_btn:
+                        curr_case["review_mode"] = "paper" if edit_mode == "紙本審核" else "online"
                         curr_case["scholarship_type"] = edit_scholarship_type
                         curr_case["unit_level1"] = current_scope() or edit_l1
                         curr_case["unit_level2"] = edit_l2
@@ -1095,6 +1109,7 @@ else:
                     "review_reason": ai_res.get("review_reason", ""),
                     "is_eligible": ai_res.get("is_eligible", False),
                     "notes": ai_res.get("notes", ""),
+                    "review_mode": "online",
                     "images": admin_imgs,
                     "image_labels": admin_lbls,
                     "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1132,6 +1147,7 @@ else:
                 table_rows.append({
                     "序號": idx,
                     "案件編號": r.get("id", ""),
+                    "審核方式": "紙本審核" if r.get("review_mode") == "paper" else "線上審核",
                     "獎學金類別": r.get("scholarship_type", "未分類"),
                     "大隊 / 局本部": r.get("unit_level1", "未指定"),
                     "分隊 / 科室": r.get("unit_level2", "未指定"),
@@ -1317,6 +1333,37 @@ else:
                                 f"原始照片無法復原，請通知相關分隊確認是否需要補送。"
                             )
                             st.rerun()
+
+        if can_manage_system():
+            st.markdown("---")
+            st.markdown('<div class="section-title">📄 批次轉為紙本審核</div>', unsafe_allow_html=True)
+            st.caption(
+                "用於資料復原等情境：把「目前系統上所有案件」一次標記為紙本審核，"
+                "之後不會再要求補傳線上附件，改由大隊或業務科依實際收到的紙本文件核對、於複核工作台更新審核結果。"
+                "此後**新送出**的申請仍會照常走線上審核，不受影響。個別案件也可以在複核工作台單獨切換審核方式。"
+            )
+            all_now = load_records_json()
+            paper_now = sum(1 for r in all_now if r.get("review_mode") == "paper")
+
+            def _do_mark_all_paper():
+                updated_count = mark_all_as_paper_review()
+                st.session_state.records = load_stored_cases()
+                st.session_state["paper_all_confirm"] = False
+                st.session_state["paper_all_result"] = updated_count
+
+            if st.session_state.get("paper_all_result") is not None:
+                st.success(f"✅ 已將 {st.session_state.pop('paper_all_result')} 筆案件標記為紙本審核。")
+
+            if all_now:
+                st.write(f"目前共 {len(all_now)} 筆案件，其中 {paper_now} 筆已是紙本審核。")
+                st.checkbox("我確認要把目前所有案件標記為紙本審核", key="paper_all_confirm")
+                st.button(
+                    "📄 將目前所有案件標記為紙本審核", type="primary",
+                    disabled=not st.session_state.get("paper_all_confirm", False),
+                    on_click=_do_mark_all_paper,
+                )
+            else:
+                st.info("目前沒有案件。")
 
         # ----------------- 刪除指定案件 (重複或誤送資料) -----------------
         st.markdown("---")
