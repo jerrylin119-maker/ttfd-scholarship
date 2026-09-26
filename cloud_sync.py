@@ -12,12 +12,50 @@ GOOGLE_APPS_SCRIPT_TEMPLATE = """
 //   1. 義消聯合總會獎助學金
 //   2. 本局津芳冰城陳慶銳先生獎學金
 // 若日後新增其他類別，會自動以該類別名稱建立新分頁，無需修改程式碼。
+// 支援 GET ?action=export：匯出所有分頁資料為 JSON，供系統端「從雲端試算表復原資料」功能使用。
 
 function doGet(e) {
+  var action = e && e.parameter && e.parameter.action;
+  if (action === "export") {
+    return exportAllSheets_();
+  }
   return ContentService.createTextOutput(JSON.stringify({
     status: "ok",
     message: "🚒 臺東縣消防局 獎學金同步 Webhook 連線正常！"
   })).setMimeType(ContentService.MimeType.JSON);
+}
+
+// 匯出所有分頁資料為 JSON，供系統資料遺失時復原使用 (只有文字欄位，不含原始照片)
+function exportAllSheets_() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
+    var result = {};
+    for (var s = 0; s < sheets.length; s++) {
+      var sheet = sheets[s];
+      var values = sheet.getDataRange().getValues();
+      var rows = [];
+      if (values.length >= 2) {
+        var headers = values[0];
+        var idIdx = headers.indexOf("案件編號");
+        for (var r = 1; r < values.length; r++) {
+          var row = values[r];
+          if (idIdx >= 0 && (!row[idIdx] || String(row[idIdx]).trim() === "")) continue;
+          var obj = {};
+          for (var c = 0; c < headers.length; c++) {
+            obj[headers[c]] = row[c];
+          }
+          rows.push(obj);
+        }
+      }
+      result[sheet.getName()] = rows;
+    }
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", sheets: result}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
 }
 
 function getOrCreateSheet_(ss, name) {
@@ -165,3 +203,81 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
             return False, f"同步失敗，伺服器回應代碼：{resp.status_code}"
     except Exception as e:
         return False, f"連線至 Google 試算表時發生錯誤: {str(e)}"
+
+
+def _parse_attachment_desc(desc: Any) -> Dict[str, bool]:
+    """把附件檢核欄位的描述文字 (如「齊全 (5/5)」或「缺: 申請表,成績單 (3/5)」) 還原成 5 項附件的布林值"""
+    keys = [
+        ("application_form", "申請表"),
+        ("student_id_or_enrollment", "在學證明"),
+        ("transcript", "成績單"),
+        ("household_registration", "戶籍謄本"),
+        ("service_certificate", "服務證明"),
+    ]
+    text = str(desc or "").strip()
+    if text.startswith("缺"):
+        missing_part = text.split("(")[0]
+        missing_part = missing_part.replace("缺:", "").replace("缺：", "")
+        missing_names = {x.strip() for x in missing_part.split(",") if x.strip()}
+        return {k: (name not in missing_names) for k, name in keys}
+    # 「齊全 (5/5)」或格式不明時，預設視為齊全 (避免復原後全部誤判為待補件；請大隊複核時人工確認)
+    return {k: True for k, _ in keys}
+
+
+def fetch_cases_from_google_sheets(webhook_url: str) -> Tuple[bool, Any]:
+    """
+    從 Google 試算表讀回所有分頁的資料，還原成系統可用的案件清單。
+    僅適用於本地資料遺失時的緊急復原：只能救回文字欄位 (姓名、身分證字號、成績、審核結果等)，
+    原始照片與確切的原始送件時間無法復原。
+    成功時回傳 (True, 案件清單)；失敗時回傳 (False, 錯誤訊息字串)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    try:
+        resp = requests.get(clean_url, params={"action": "export"}, timeout=30, allow_redirects=True)
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code != 200:
+        return False, f"讀取失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"讀取失敗：{data.get('error', '未知錯誤')}"
+
+    restored: List[Dict[str, Any]] = []
+    for rows in (data.get("sheets") or {}).values():
+        for row in rows:
+            case_id = str(row.get("案件編號", "")).strip()
+            if not case_id:
+                continue
+            gpa_raw = row.get("學期總平均", "")
+            try:
+                gpa = round(float(gpa_raw), 2)
+            except (TypeError, ValueError):
+                gpa = None
+            status = str(row.get("審核結果", "") or "").strip()
+            sync_time = str(row.get("最後同步時間", "") or "").strip()
+            restored.append({
+                "id": case_id,
+                "scholarship_type": str(row.get("獎學金類別", "") or "未分類"),
+                "unit_level1": str(row.get("大隊/局本部", "") or "未指定"),
+                "unit_level2": str(row.get("分隊/科室", "") or "未指定"),
+                "applicant_name": str(row.get("申請人姓名", "") or ""),
+                "applicant_id": str(row.get("身分證字號", "") or ""),
+                "child_name": str(row.get("子女姓名", "") or ""),
+                "category": str(row.get("申請組別", "") or "大專院校"),
+                "semester_gpa": gpa,
+                "conduct": str(row.get("操行成績", "") or ""),
+                "attachments": _parse_attachment_desc(row.get("附件檢核(5項)", "")),
+                "review_status": status or "待審核",
+                "review_reason": str(row.get("判定理由說明", "") or ""),
+                "is_eligible": status == "符合資格",
+                "notes": f"⚠️ 本案件由雲端試算表復原，原始照片與確切送件時間已遺失。試算表最後同步時間：{sync_time or '未知'}",
+                "images": [],
+                "image_labels": [],
+                "submitted_at": sync_time or "未知（復原資料）",
+            })
+    return True, restored

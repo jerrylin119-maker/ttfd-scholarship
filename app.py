@@ -49,7 +49,12 @@ from gemini_analyzer import (
 )
 import cloud_sync
 importlib.reload(cloud_sync)
-from cloud_sync import sync_to_google_sheets, test_webhook_connection, GOOGLE_APPS_SCRIPT_TEMPLATE
+from cloud_sync import (
+    sync_to_google_sheets,
+    test_webhook_connection,
+    fetch_cases_from_google_sheets,
+    GOOGLE_APPS_SCRIPT_TEMPLATE,
+)
 
 @st.cache_resource
 def get_global_server_config():
@@ -1226,159 +1231,194 @@ else:
                 - **照片打包**：可隨時一鍵打包下載所有分隊上傳的佐證照片（此項不受篩選影響，固定為您可檢視的全部案件）
                 """)
                 
-            if can_manage_system():
-                st.markdown("---")
-                st.markdown('<div class="section-title">☁️ 雲端試算表 (Google Sheets) 一鍵同步</div>', unsafe_allow_html=True)
-                col_g1, col_g2 = st.columns([1.4, 1.1])
-                with col_g1:
-                    webhook_url = st.text_input(
-                        "Google 試算表 Webhook 網址 (Google Apps Script Web App URL)",
-                        value=st.session_state.get("google_sheet_webhook", ""),
-                        help="請貼上您的 Google Apps Script 網路應用程式部署網址 (https://script.google.com/macros/s/.../exec)"
-                    )
-                    if webhook_url != st.session_state.get("google_sheet_webhook", ""):
-                        save_persistent_webhook(webhook_url)
-                    
-                    col_btn1, col_btn2 = st.columns(2)
-                    with col_btn1:
-                        if st.button("🧪 測試 Webhook 連線", use_container_width=True):
-                            if not webhook_url:
-                                st.warning("請先輸入 Webhook 網址！")
-                            else:
-                                with st.spinner("連線測試中..."):
-                                    ok, test_msg = test_webhook_connection(webhook_url)
-                                    if ok:
-                                        st.success(test_msg)
-                                    else:
-                                        st.error(test_msg)
-                                    
-                    with col_btn2:
-                        if st.button("☁️ 立即同步至 Google 試算表", use_container_width=True, type="primary"):
-                            if not webhook_url:
-                                st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
-                            else:
-                                with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
-                                    success, msg = sync_latest_to_google_sheets(webhook_url)
-                                    if success:
-                                        st.success(f"🎉 {msg}")
-                                    else:
-                                        st.error(f"❌ {msg}")
-                                
-                with col_g2:
-                    with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
-                        st.markdown("""
-                        **三步驟快速設定 Google 試算表自動同步：**
-                        1. 建立一個新的 [Google 試算表](https://sheets.new)。
-                        2. 點擊上方選單 **「擴充功能」 $\\rightarrow$ 「Apps Script」**。
-                        3. 貼上標準同步腳本並發布為 **「網路應用程式」** (所有人可存取)。
-
-                        ⚠️ 若您先前已部署過舊版腳本，請改貼下方最新版程式碼並**重新部署**，
-                        同步後會依「獎學金類別」自動分別建立 **義消聯合總會獎助學金** 與
-                        **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
-                        """)
-                        st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
-
-            # ----------------- 刪除指定案件 (重複或誤送資料) -----------------
+        if can_manage_system():
             st.markdown("---")
-            st.markdown('<div class="section-title">🗑️ 刪除指定案件（重複或誤送資料）</div>', unsafe_allow_html=True)
-            with st.expander("展開刪除工具（只會刪除您勾選的案件，其餘案件不受影響）", expanded=False):
-                if not can_delete():
-                    st.info("🔒 舊版共用密碼帳號沒有刪除權限，請改用「業務科」或「各大隊」專屬帳號登入。")
+            st.markdown('<div class="section-title">☁️ 雲端試算表 (Google Sheets) 一鍵同步</div>', unsafe_allow_html=True)
+            col_g1, col_g2 = st.columns([1.4, 1.1])
+            with col_g1:
+                webhook_url = st.text_input(
+                    "Google 試算表 Webhook 網址 (Google Apps Script Web App URL)",
+                    value=st.session_state.get("google_sheet_webhook", ""),
+                    help="請貼上您的 Google Apps Script 網路應用程式部署網址 (https://script.google.com/macros/s/.../exec)"
+                )
+                if webhook_url != st.session_state.get("google_sheet_webhook", ""):
+                    save_persistent_webhook(webhook_url)
+                
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("🧪 測試 Webhook 連線", use_container_width=True):
+                        if not webhook_url:
+                            st.warning("請先輸入 Webhook 網址！")
+                        else:
+                            with st.spinner("連線測試中..."):
+                                ok, test_msg = test_webhook_connection(webhook_url)
+                                if ok:
+                                    st.success(test_msg)
+                                else:
+                                    st.error(test_msg)
+                                
+                with col_btn2:
+                    if st.button("☁️ 立即同步至 Google 試算表", use_container_width=True, type="primary"):
+                        if not webhook_url:
+                            st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                        else:
+                            with st.spinner("正在將審核清冊同步至 Google 雲端試算表..."):
+                                success, msg = sync_latest_to_google_sheets(webhook_url)
+                                if success:
+                                    st.success(f"🎉 {msg}")
+                                else:
+                                    st.error(f"❌ {msg}")
+                            
+            with col_g2:
+                with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
+                    st.markdown("""
+                    **三步驟快速設定 Google 試算表自動同步：**
+                    1. 建立一個新的 [Google 試算表](https://sheets.new)。
+                    2. 點擊上方選單 **「擴充功能」 $\\rightarrow$ 「Apps Script」**。
+                    3. 貼上標準同步腳本並發布為 **「網路應用程式」** (所有人可存取)。
+
+                    ⚠️ 若您先前已部署過舊版腳本，請改貼下方最新版程式碼並**重新部署**，
+                    同步後會依「獎學金類別」自動分別建立 **義消聯合總會獎助學金** 與
+                    **本局津芳冰城陳慶銳先生獎學金** 兩個工作表分頁。
+                    """)
+                    st.code(GOOGLE_APPS_SCRIPT_TEMPLATE, language="javascript")
+
+            st.markdown("---")
+            st.markdown('<div class="section-title">🛟 從雲端試算表復原資料（僅限本地資料遺失時使用）</div>', unsafe_allow_html=True)
+            st.caption(
+                "Streamlit Cloud 的本地磁碟並非永久儲存，伺服器重啟（含手動 Reboot、閒置回收、重新部署）都會清空 "
+                "./data/ 與 ./uploads/。若發生這種狀況，可從雲端試算表把**文字資料**復原回系統；"
+                "只會新增試算表裡「本地目前沒有」的案件編號，不會覆蓋或刪除本地既有資料。"
+            )
+            st.warning("⚠️ 只能復原姓名、身分證字號、成績、審核結果等文字欄位，**原始上傳照片無法復原**，需請相關分隊確認是否要補送照片存查。")
+            if st.button("🛟 立即從雲端試算表復原資料", use_container_width=True):
+                if not webhook_url:
+                    st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
                 else:
-                    scope_now = current_scope()
-                    stored_records = [r for r in load_records_json() if not scope_now or r.get("unit_level1") == scope_now]
-
-                    # 找出疑似重複的案件 (同類別、同子女、同家長)，在選單上標註，方便挑出重複上傳的那一筆
-                    key_groups = {}
-                    for r in stored_records:
-                        for k in case_dup_keys(r):
-                            key_groups.setdefault(k, set()).add(str(r.get("id", "")))
-
-                    def _dup_mark(r):
-                        me = str(r.get("id", ""))
-                        others = set()
-                        for k in case_dup_keys(r):
-                            others |= key_groups.get(k, set())
-                        others.discard(me)
-                        return f"｜⚠️疑似重複，另有 {'、'.join(sorted(others))}" if others else ""
-
-                    del_options = {}
-                    for r in stored_records:
-                        del_options[str(r.get("id", ""))] = (
-                            f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
-                            f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
-                            f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
-                            f"送件:{r.get('submitted_at', '—')}｜{r.get('review_status', '—')}" + _dup_mark(r)
-                        )
-
-                    if st.session_state.get("del_result"):
-                        kind, text = st.session_state.pop("del_result")
-                        (st.success if kind == "ok" else st.error)(text)
-
-                    def _do_delete():
-                        if not can_delete():
-                            return
-                        ids = list(st.session_state.get("admin_del_select", []))
-                        deleted_ids, msg = delete_cases_from_storage(ids, allowed_unit=current_scope(), actor=actor_label())
-                        if not deleted_ids:
-                            st.session_state["del_result"] = ("err", f"❌ {msg}")
-                            return
-                        # 以檔案內最新資料重新載入畫面，並清除選取狀態
-                        st.session_state.records = load_stored_cases()
-                        try:
-                            st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
-                        except OSError:
-                            pass
-                        remain = visible(st.session_state.records)
-                        if st.session_state.get("selected_case_id") in deleted_ids:
-                            st.session_state.selected_case_id = remain[0]["id"] if remain else None
-                        st.session_state["admin_del_select"] = []
-                        st.session_state["admin_del_confirm"] = False
-                        text = f"✅ {msg}（已自動備份刪除前的資料，並記錄於刪除紀錄）"
-                        hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-                        if hook:
-                            try:
-                                ok_s, msg_s = sync_latest_to_google_sheets(hook)
-                                text += f"　☁️ 雲端試算表：{msg_s}"
-                            except Exception as e:
-                                text += f"　⚠️ 雲端試算表同步失敗，請洽業務科手動同步：{e}"
-                        st.session_state["del_result"] = ("ok", text)
-
-                    if not del_options:
-                        st.info("目前沒有可刪除的案件。")
+                    with st.spinner("正在從雲端試算表讀取資料..."):
+                        ok_fetch, fetch_result = fetch_cases_from_google_sheets(webhook_url)
+                    if not ok_fetch:
+                        st.error(f"❌ {fetch_result}")
                     else:
-                        if scope_now:
-                            st.caption(f"您只能看到、也只能刪除 **{scope_now}** 的案件。")
-                        st.multiselect(
-                            "請選擇要刪除的案件（可多選）：",
-                            options=list(del_options.keys()),
-                            format_func=lambda cid: del_options[cid],
-                            key="admin_del_select",
-                            placeholder="點選要刪除的重複／誤送案件…"
-                        )
-                        picked = st.session_state.get("admin_del_select", [])
-                        if picked:
-                            st.warning(
-                                f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
-                                f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
+                        existing_ids = {str(r.get("id", "")) for r in load_records_json()}
+                        new_cases = [r for r in fetch_result if str(r.get("id", "")) not in existing_ids]
+                        if not new_cases:
+                            st.info(f"雲端試算表共有 {len(fetch_result)} 筆資料，皆已存在於系統中，沒有需要復原的案件。")
+                        else:
+                            for restored_case in new_cases:
+                                save_case_to_storage(restored_case)
+                            st.session_state.records = load_stored_cases()
+                            try:
+                                st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
+                            except OSError:
+                                pass
+                            st.success(
+                                f"✅ 已從雲端試算表復原 {len(new_cases)} 筆案件（{', '.join(r['id'] for r in new_cases)}）。"
+                                f"原始照片無法復原，請通知相關分隊確認是否需要補送。"
                             )
-                            st.checkbox("我已確認上列案件為重複上傳或誤送資料，同意永久刪除", key="admin_del_confirm")
-                            st.button(
-                                "🗑️ 確認刪除選取的案件",
-                                type="primary",
-                                disabled=not st.session_state.get("admin_del_confirm", False),
-                                on_click=_do_delete,
-                                use_container_width=True
-                            )
+                            st.rerun()
 
-                    log_rows = load_delete_log(unit=current_scope())
-                    if log_rows:
-                        st.markdown("##### 📜 最近刪除紀錄")
-                        st.dataframe(
-                            pd.DataFrame(log_rows[:30]).rename(columns={
-                                "time": "刪除時間", "by": "執行帳號", "id": "案件編號", "scholarship_type": "獎學金類別",
-                                "unit_level1": "大隊/局本部", "unit_level2": "分隊/科室",
-                                "applicant_name": "家長", "child_name": "子女", "submitted_at": "原送件時間"
-                            }),
-                            use_container_width=True, hide_index=True
+        # ----------------- 刪除指定案件 (重複或誤送資料) -----------------
+        st.markdown("---")
+        st.markdown('<div class="section-title">🗑️ 刪除指定案件（重複或誤送資料）</div>', unsafe_allow_html=True)
+        with st.expander("展開刪除工具（只會刪除您勾選的案件，其餘案件不受影響）", expanded=False):
+            if not can_delete():
+                st.info("🔒 舊版共用密碼帳號沒有刪除權限，請改用「業務科」或「各大隊」專屬帳號登入。")
+            else:
+                scope_now = current_scope()
+                stored_records = [r for r in load_records_json() if not scope_now or r.get("unit_level1") == scope_now]
+
+                # 找出疑似重複的案件 (同類別、同子女、同家長)，在選單上標註，方便挑出重複上傳的那一筆
+                key_groups = {}
+                for r in stored_records:
+                    for k in case_dup_keys(r):
+                        key_groups.setdefault(k, set()).add(str(r.get("id", "")))
+
+                def _dup_mark(r):
+                    me = str(r.get("id", ""))
+                    others = set()
+                    for k in case_dup_keys(r):
+                        others |= key_groups.get(k, set())
+                    others.discard(me)
+                    return f"｜⚠️疑似重複，另有 {'、'.join(sorted(others))}" if others else ""
+
+                del_options = {}
+                for r in stored_records:
+                    del_options[str(r.get("id", ""))] = (
+                        f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
+                        f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
+                        f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}｜"
+                        f"送件:{r.get('submitted_at', '—')}｜{r.get('review_status', '—')}" + _dup_mark(r)
+                    )
+
+                if st.session_state.get("del_result"):
+                    kind, text = st.session_state.pop("del_result")
+                    (st.success if kind == "ok" else st.error)(text)
+
+                def _do_delete():
+                    if not can_delete():
+                        return
+                    ids = list(st.session_state.get("admin_del_select", []))
+                    deleted_ids, msg = delete_cases_from_storage(ids, allowed_unit=current_scope(), actor=actor_label())
+                    if not deleted_ids:
+                        st.session_state["del_result"] = ("err", f"❌ {msg}")
+                        return
+                    # 以檔案內最新資料重新載入畫面，並清除選取狀態
+                    st.session_state.records = load_stored_cases()
+                    try:
+                        st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
+                    except OSError:
+                        pass
+                    remain = visible(st.session_state.records)
+                    if st.session_state.get("selected_case_id") in deleted_ids:
+                        st.session_state.selected_case_id = remain[0]["id"] if remain else None
+                    st.session_state["admin_del_select"] = []
+                    st.session_state["admin_del_confirm"] = False
+                    text = f"✅ {msg}（已自動備份刪除前的資料，並記錄於刪除紀錄）"
+                    hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                    if hook:
+                        try:
+                            ok_s, msg_s = sync_latest_to_google_sheets(hook)
+                            text += f"　☁️ 雲端試算表：{msg_s}"
+                        except Exception as e:
+                            text += f"　⚠️ 雲端試算表同步失敗，請洽業務科手動同步：{e}"
+                    st.session_state["del_result"] = ("ok", text)
+
+                if not del_options:
+                    st.info("目前沒有可刪除的案件。")
+                else:
+                    if scope_now:
+                        st.caption(f"您只能看到、也只能刪除 **{scope_now}** 的案件。")
+                    st.multiselect(
+                        "請選擇要刪除的案件（可多選）：",
+                        options=list(del_options.keys()),
+                        format_func=lambda cid: del_options[cid],
+                        key="admin_del_select",
+                        placeholder="點選要刪除的重複／誤送案件…"
+                    )
+                    picked = st.session_state.get("admin_del_select", [])
+                    if picked:
+                        st.warning(
+                            f"⚠️ 即將永久刪除 **{len(picked)}** 筆案件（含其原始照片）：{'、'.join(picked)}。"
+                            f"其餘 **{len(stored_records) - len(picked)}** 筆案件不會被更動。"
                         )
+                        st.checkbox("我已確認上列案件為重複上傳或誤送資料，同意永久刪除", key="admin_del_confirm")
+                        st.button(
+                            "🗑️ 確認刪除選取的案件",
+                            type="primary",
+                            disabled=not st.session_state.get("admin_del_confirm", False),
+                            on_click=_do_delete,
+                            use_container_width=True
+                        )
+
+                log_rows = load_delete_log(unit=current_scope())
+                if log_rows:
+                    st.markdown("##### 📜 最近刪除紀錄")
+                    st.dataframe(
+                        pd.DataFrame(log_rows[:30]).rename(columns={
+                            "time": "刪除時間", "by": "執行帳號", "id": "案件編號", "scholarship_type": "獎學金類別",
+                            "unit_level1": "大隊/局本部", "unit_level2": "分隊/科室",
+                            "applicant_name": "家長", "child_name": "子女", "submitted_at": "原送件時間"
+                        }),
+                        use_container_width=True, hide_index=True
+                    )
