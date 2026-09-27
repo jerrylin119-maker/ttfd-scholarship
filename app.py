@@ -55,6 +55,7 @@ from cloud_sync import (
     test_webhook_connection,
     fetch_cases_from_google_sheets,
     upload_photos_to_drive,
+    delete_from_google_sheets,
     GOOGLE_APPS_SCRIPT_TEMPLATE,
 )
 
@@ -1449,10 +1450,10 @@ else:
                     hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                     if hook:
                         try:
-                            ok_s, msg_s = sync_latest_to_google_sheets(hook)
+                            ok_s, msg_s = delete_from_google_sheets(hook, deleted_ids)
                             text += f"　☁️ 雲端試算表：{msg_s}"
                         except Exception as e:
-                            text += f"　⚠️ 雲端試算表同步失敗，請洽業務科手動同步：{e}"
+                            text += f"　⚠️ 雲端試算表同步刪除失敗，請洽業務科手動處理：{e}"
                     st.session_state["del_result"] = ("ok", text)
 
                 if not del_options:

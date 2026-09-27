@@ -17,6 +17,9 @@ GOOGLE_APPS_SCRIPT_TEMPLATE = """
 // 支援 GET ?action=export：匯出所有分頁資料為 JSON，供系統端「從雲端試算表復原資料」功能使用。
 // 支援 POST {action:"upload_photos"}：把新案件的原始照片存進 Google 雲端硬碟指定資料夾（依大隊分子資料夾），
 // 讓照片不受 Streamlit 伺服器重啟影響、能長期保存；回傳的雲端硬碟連結會一併寫回試算表欄位。
+// 【安全性修正】同步已改為「依案件編號比對更新」(upsert)，不會再清空整個分頁重寫：
+// 即使本機系統資料因伺服器重啟而不完整，也不會誤刪試算表裡既有的其他案件。
+// 真正要刪除案件時，系統會另外送出 {action:"delete_records"} 明確指定要刪除的案件編號。
 
 function doGet(e) {
   var action = e && e.parameter && e.parameter.action;
@@ -62,30 +65,48 @@ function exportAllSheets_() {
   }
 }
 
+var SHEET_HEADERS_ = [
+  "序號", "案件編號", "獎學金類別", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
+  "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "雲端硬碟連結", "最後同步時間"
+];
+var ID_COL_ = 2; // 「案件編號」是第 2 欄
+
 function getOrCreateSheet_(ss, name) {
   var sheet = ss.getSheetByName(name);
   if (!sheet) {
     sheet = ss.insertSheet(name);
   }
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(SHEET_HEADERS_);
+    sheet.getRange(1, 1, 1, SHEET_HEADERS_.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+  }
   return sheet;
 }
 
-function writeHeaderAndRows_(sheet, rows) {
-  // 清除現有內容並寫入 15 欄標準表頭 (含獎學金類別)
-  sheet.clear();
-  var headers = [
-    "序號", "案件編號", "獎學金類別", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
-    "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "雲端硬碟連結", "最後同步時間"
-  ];
-  sheet.appendRow(headers);
-  sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+// 讀出某分頁「案件編號 -> 實際列號」的對照表 (第 1 列是表頭，資料從第 2 列起)
+function indexRowsById_(sheet) {
+  var lastRow = sheet.getLastRow();
+  var map = {};
+  if (lastRow < 2) return map;
+  var ids = sheet.getRange(2, ID_COL_, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    var id = String(ids[i][0] || "").trim();
+    if (id) map[id] = i + 2;
+  }
+  return map;
+}
 
+// 依案件編號比對更新：既有的更新該列，新的加到最後面；不存在於這批資料中的既有列「原封不動保留」，
+// 避免因本機資料不完整而誤刪試算表裡其他案件 (例如伺服器重啟後本機只剩剛送出的 1 筆時)
+function upsertRows_(sheet, rows) {
+  var idToRow = indexRowsById_(sheet);
   var now = new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"});
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
-    sheet.appendRow([
-      i + 1,
-      r.id || "",
+    var id = String(r.id || "").trim();
+    var rowValues = [
+      "", // 序號留待最後統一重新編號
+      id,
       r.scholarship_type || "未分類",
       r.unit_level1 || "",
       r.unit_level2 || "",
@@ -100,9 +121,51 @@ function writeHeaderAndRows_(sheet, rows) {
       r.review_reason || "",
       r.drive_links || "",
       now
-    ]);
+    ];
+    if (id && idToRow[id]) {
+      sheet.getRange(idToRow[id], 1, 1, SHEET_HEADERS_.length).setValues([rowValues]);
+    } else {
+      sheet.appendRow(rowValues);
+      if (id) idToRow[id] = sheet.getLastRow();
+    }
   }
-  sheet.autoResizeColumns(1, headers.length);
+  renumberSeq_(sheet);
+  sheet.autoResizeColumns(1, SHEET_HEADERS_.length);
+}
+
+// 重新編排「序號」欄 (第 1 欄)，讓畫面上的序號維持連續，不影響案件編號等其他欄位
+function renumberSeq_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  var seq = [];
+  for (var i = 1; i <= lastRow - 1; i++) seq.push([i]);
+  sheet.getRange(2, 1, lastRow - 1, 1).setValues(seq);
+}
+
+// 明確刪除指定案件編號的列 (用於後台「刪除指定案件」時，同步移除試算表對應資料)
+function deleteRecords_(data) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ids = {};
+  (data.ids || []).forEach(function (id) { ids[String(id).trim()] = true; });
+  var deleted = [];
+  var sheets = ss.getSheets();
+  for (var s = 0; s < sheets.length; s++) {
+    var sheet = sheets[s];
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) continue;
+    var idVals = sheet.getRange(2, ID_COL_, lastRow - 1, 1).getValues();
+    // 由下往上刪，避免刪除後列號位移影響尚未處理的列
+    for (var r = idVals.length - 1; r >= 0; r--) {
+      var id = String(idVals[r][0] || "").trim();
+      if (id && ids[id]) {
+        sheet.deleteRow(r + 2);
+        deleted.push(id);
+      }
+    }
+    renumberSeq_(sheet);
+  }
+  return ContentService.createTextOutput(JSON.stringify({status: "ok", deleted: deleted}))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // 獎學金申請附件存放的雲端硬碟資料夾 ID (若要換一個資料夾，把下面這串換成新資料夾網址裡的 ID 即可)
@@ -113,6 +176,9 @@ function doPost(e) {
     var data = JSON.parse(e.postData.contents);
     if (data.action === "upload_photos") {
       return uploadPhotos_(data);
+    }
+    if (data.action === "delete_records") {
+      return deleteRecords_(data);
     }
     return syncAll_(data);
   } catch (err) {
@@ -125,7 +191,7 @@ function syncAll_(data) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var rows = data.records;
 
-  // 依「獎學金類別」將資料分組，各類別各自寫入獨立分頁
+  // 依「獎學金類別」將資料分組，各類別各自寫入獨立分頁 (只新增/更新，不清除既有其他列)
   var grouped = {};
   var order = [];
   for (var i = 0; i < rows.length; i++) {
@@ -140,7 +206,7 @@ function syncAll_(data) {
   for (var j = 0; j < order.length; j++) {
     var typeName = order[j];
     var sheet = getOrCreateSheet_(ss, typeName);
-    writeHeaderAndRows_(sheet, grouped[typeName]);
+    upsertRows_(sheet, grouped[typeName]);
   }
 
   return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length, types: order}))
@@ -370,3 +436,34 @@ def upload_photos_to_drive(webhook_url: str, case_id: str, unit_level1: str, ima
     if data.get("status") != "ok":
         return False, f"上傳失敗：{data.get('error', '未知錯誤')}"
     return True, data.get("links", [])
+
+
+def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:
+    """明確通知 Google 試算表刪除指定案件編號的列 (用於後台刪除案件時，讓試算表與本機保持一致)"""
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    ids = [str(i) for i in (ids or []) if str(i).strip()]
+    if not ids:
+        return True, "沒有需要從試算表刪除的案件"
+    payload = {"action": "delete_records", "ids": ids}
+    try:
+        resp = requests.post(
+            clean_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code not in (200, 302):
+        return False, f"刪除失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"刪除失敗：{data.get('error', '未知錯誤')}"
+    deleted = data.get("deleted", [])
+    return True, f"已從雲端試算表刪除 {len(deleted)} 筆案件"
