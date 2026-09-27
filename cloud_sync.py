@@ -83,26 +83,22 @@ function getOrCreateSheet_(ss, name) {
   return sheet;
 }
 
-// 讀出某分頁「案件編號 -> 實際列號」的對照表 (第 1 列是表頭，資料從第 2 列起)
-function indexRowsById_(sheet) {
-  var lastRow = sheet.getLastRow();
-  var map = {};
-  if (lastRow < 2) return map;
-  var ids = sheet.getRange(2, ID_COL_, lastRow - 1, 1).getValues();
-  for (var i = 0; i < ids.length; i++) {
-    var id = String(ids[i][0] || "").trim();
-    if (id) map[id] = i + 2;
-  }
-  return map;
-}
-
 // 依案件編號比對更新：既有的更新該列，新的加到最後面；不存在於這批資料中的既有列「原封不動保留」，
 // 避免因本機資料不完整而誤刪試算表裡其他案件 (例如伺服器重啟後本機只剩剛送出的 1 筆時)
+// 【效能】全部先在記憶體裡合併好，最後只用「一次」讀取 + 「一次」寫入處理整張表，
+// 不逐列呼叫 Sheets API，避免案件數變多後同步逾時 (逐列讀寫在案件數上升後會慢到超過用戶端逾時設定)。
 function upsertRows_(sheet, rows) {
-  var idToRow = indexRowsById_(sheet);
+  var numCols = SHEET_HEADERS_.length;
+  var lastRow = sheet.getLastRow();
+  var existing = lastRow >= 2 ? sheet.getRange(2, 1, lastRow - 1, numCols).getValues() : [];
+  var idToIndex = {};
+  for (var i = 0; i < existing.length; i++) {
+    var existingId = String(existing[i][ID_COL_ - 1] || "").trim();
+    if (existingId) idToIndex[existingId] = i;
+  }
   var now = new Date().toLocaleString("zh-TW", {timeZone: "Asia/Taipei"});
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
+  for (var j = 0; j < rows.length; j++) {
+    var r = rows[j];
     var id = String(r.id || "").trim();
     var rowValues = [
       "", // 序號留待最後統一重新編號
@@ -122,15 +118,19 @@ function upsertRows_(sheet, rows) {
       r.drive_links || "",
       now
     ];
-    if (id && idToRow[id]) {
-      sheet.getRange(idToRow[id], 1, 1, SHEET_HEADERS_.length).setValues([rowValues]);
+    if (id && idToIndex.hasOwnProperty(id)) {
+      existing[idToIndex[id]] = rowValues;
     } else {
-      sheet.appendRow(rowValues);
-      if (id) idToRow[id] = sheet.getLastRow();
+      existing.push(rowValues);
+      if (id) idToIndex[id] = existing.length - 1;
     }
   }
-  renumberSeq_(sheet);
-  sheet.autoResizeColumns(1, SHEET_HEADERS_.length);
+  for (var k = 0; k < existing.length; k++) {
+    existing[k][0] = k + 1; // 重新編排序號欄
+  }
+  if (existing.length > 0) {
+    sheet.getRange(2, 1, existing.length, numCols).setValues(existing);
+  }
 }
 
 // 重新編排「序號」欄 (第 1 欄)，讓畫面上的序號維持連續，不影響案件編號等其他欄位
@@ -300,7 +300,7 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
             clean_url,
             data=json.dumps(payload),
             headers={"Content-Type": "application/json"},
-            timeout=20,
+            timeout=60,
             allow_redirects=True
         )
         if resp.status_code in (200, 302):
@@ -452,7 +452,7 @@ def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, s
             clean_url,
             data=json.dumps(payload),
             headers={"Content-Type": "application/json"},
-            timeout=20,
+            timeout=60,
             allow_redirects=True,
         )
     except Exception as e:
