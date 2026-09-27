@@ -54,6 +54,7 @@ from cloud_sync import (
     sync_to_google_sheets,
     test_webhook_connection,
     fetch_cases_from_google_sheets,
+    upload_photos_to_drive,
     GOOGLE_APPS_SCRIPT_TEMPLATE,
 )
 
@@ -234,14 +235,26 @@ def build_new_case(ai_result, images, labels, stype, l1, l2) -> dict:
     }
 
 def finalize_submission(new_case: dict):
-    """存檔 → 更新畫面狀態 → 自動同步雲端試算表"""
+    """上傳照片至雲端硬碟（若已設定）→ 存檔 → 更新畫面狀態 → 自動同步雲端試算表"""
+    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+    if webhook_url and new_case.get("images"):
+        try:
+            ok_upload, upload_result = upload_photos_to_drive(
+                webhook_url, new_case["id"], new_case.get("unit_level1", ""), new_case["images"]
+            )
+            if ok_upload:
+                new_case["drive_photo_links"] = upload_result
+            else:
+                new_case["drive_upload_error"] = upload_result
+        except Exception as e:
+            new_case["drive_upload_error"] = str(e)
+
     save_case_to_storage(new_case)
     st.session_state.records.append(new_case)
     st.session_state.selected_case_id = new_case["id"]
     st.session_state.last_submitted_case = new_case
     st.session_state.pending_submission = None
     st.session_state.camera_photos = []
-    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
     if webhook_url:
         try:
             sync_latest_to_google_sheets(webhook_url)
@@ -926,8 +939,13 @@ else:
                 images = curr_case.get("images", [])
                 image_labels = curr_case.get("image_labels", [])
                 
+                drive_links = curr_case.get("drive_photo_links") or []
                 if not images:
-                    if curr_case.get("review_mode") == "online":
+                    if drive_links:
+                        st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失），但已備份於雲端硬碟，請點下方連結查看原始照片：")
+                        for i, link in enumerate(drive_links, 1):
+                            st.markdown(f"- [第 {i} 張原始檔案]({link})")
+                    elif curr_case.get("review_mode") == "online":
                         st.warning("⚠️ 此案件應為線上審核但無附加圖片檔案，請確認申請人是否已完成線上上傳；如確定改採紙本審核，請於右側「審核方式」調整。")
                     else:
                         st.info("📄 本案件已列為**紙本審核**（或為資料復原案件），無需線上附件；請依實際收到的紙本申請表與證明文件核對後，於右側更新審核結果。")
@@ -946,6 +964,12 @@ else:
                         
                     target_img = images[selected_img_idx]
                     st.image(target_img, use_container_width=True, caption=f"原檔 - {image_labels[selected_img_idx] if selected_img_idx < len(image_labels) else f'照片 {selected_img_idx+1}'}")
+                    if drive_links:
+                        with st.expander("☁️ 雲端硬碟備份連結"):
+                            for i, link in enumerate(drive_links, 1):
+                                st.markdown(f"- [第 {i} 張原始檔案]({link})")
+                    elif curr_case.get("drive_upload_error"):
+                        st.caption(f"⚠️ 本案件照片尚未成功備份至雲端硬碟：{curr_case.get('drive_upload_error')}")
                     
             # 右側表單區
             with col_right:

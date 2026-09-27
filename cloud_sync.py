@@ -2,6 +2,8 @@
 消防及義消子女獎學金 AI 智慧審核系統 - 雲端試算表同步模組 (含兩階層組織單位)
 """
 
+import base64
+import io
 import json
 from typing import List, Dict, Any, Tuple
 import requests
@@ -13,6 +15,8 @@ GOOGLE_APPS_SCRIPT_TEMPLATE = """
 //   2. 本局津芳冰城陳慶銳先生獎學金
 // 若日後新增其他類別，會自動以該類別名稱建立新分頁，無需修改程式碼。
 // 支援 GET ?action=export：匯出所有分頁資料為 JSON，供系統端「從雲端試算表復原資料」功能使用。
+// 支援 POST {action:"upload_photos"}：把新案件的原始照片存進 Google 雲端硬碟指定資料夾（依大隊分子資料夾），
+// 讓照片不受 Streamlit 伺服器重啟影響、能長期保存；回傳的雲端硬碟連結會一併寫回試算表欄位。
 
 function doGet(e) {
   var action = e && e.parameter && e.parameter.action;
@@ -71,7 +75,7 @@ function writeHeaderAndRows_(sheet, rows) {
   sheet.clear();
   var headers = [
     "序號", "案件編號", "獎學金類別", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
-    "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "最後同步時間"
+    "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "雲端硬碟連結", "最後同步時間"
   ];
   sheet.appendRow(headers);
   sheet.getRange(1, 1, 1, headers.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
@@ -94,42 +98,77 @@ function writeHeaderAndRows_(sheet, rows) {
       r.attachment_desc || "",
       r.review_status || "",
       r.review_reason || "",
+      r.drive_links || "",
       now
     ]);
   }
   sheet.autoResizeColumns(1, headers.length);
 }
 
+// 獎學金申請附件存放的雲端硬碟資料夾 ID (若要換一個資料夾，把下面這串換成新資料夾網址裡的 ID 即可)
+var PHOTO_ROOT_FOLDER_ID = "1ykZyvsQ3wqjt5Mfh0-ITBdkudDot0guV";
+
 function doPost(e) {
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
     var data = JSON.parse(e.postData.contents);
-    var rows = data.records;
-
-    // 依「獎學金類別」將資料分組，各類別各自寫入獨立分頁
-    var grouped = {};
-    var order = [];
-    for (var i = 0; i < rows.length; i++) {
-      var t = rows[i].scholarship_type || "未分類";
-      if (!grouped[t]) {
-        grouped[t] = [];
-        order.push(t);
-      }
-      grouped[t].push(rows[i]);
+    if (data.action === "upload_photos") {
+      return uploadPhotos_(data);
     }
-
-    for (var j = 0; j < order.length; j++) {
-      var typeName = order[j];
-      var sheet = getOrCreateSheet_(ss, typeName);
-      writeHeaderAndRows_(sheet, grouped[typeName]);
-    }
-
-    return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length, types: order}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return syncAll_(data);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+function syncAll_(data) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var rows = data.records;
+
+  // 依「獎學金類別」將資料分組，各類別各自寫入獨立分頁
+  var grouped = {};
+  var order = [];
+  for (var i = 0; i < rows.length; i++) {
+    var t = rows[i].scholarship_type || "未分類";
+    if (!grouped[t]) {
+      grouped[t] = [];
+      order.push(t);
+    }
+    grouped[t].push(rows[i]);
+  }
+
+  for (var j = 0; j < order.length; j++) {
+    var typeName = order[j];
+    var sheet = getOrCreateSheet_(ss, typeName);
+    writeHeaderAndRows_(sheet, grouped[typeName]);
+  }
+
+  return ContentService.createTextOutput(JSON.stringify({status: "success", count: rows.length, types: order}))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function getOrCreateSubfolder_(parent, name) {
+  var it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(name);
+}
+
+// 把一筆案件的照片存進「PHOTO_ROOT_FOLDER_ID / 大隊名稱 /」底下，回傳每張照片的雲端硬碟連結
+// 檔案沿用試算表擁有者（貴局業務科）帳號的預設權限，不會另外公開分享，權限請自行透過雲端硬碟的「共用」設定給需要查看的同仁
+function uploadPhotos_(data) {
+  var root = DriveApp.getFolderById(PHOTO_ROOT_FOLDER_ID);
+  var unitFolder = getOrCreateSubfolder_(root, data.unit_level1 || "未分類單位");
+  var links = [];
+  var files = data.files || [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    var bytes = Utilities.base64Decode(f.data);
+    var blob = Utilities.newBlob(bytes, f.mimeType || "image/jpeg", f.filename || ("photo_" + i + ".jpg"));
+    var file = unitFolder.createFile(blob);
+    links.push(file.getUrl());
+  }
+  return ContentService.createTextOutput(JSON.stringify({status: "ok", links: links}))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 """
 
@@ -181,7 +220,8 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
             "conduct": r.get("conduct", ""),
             "attachment_desc": att_desc,
             "review_status": r.get("review_status", ""),
-            "review_reason": r.get("review_reason", r.get("notes", ""))
+            "review_reason": r.get("review_reason", r.get("notes", "")),
+            "drive_links": " | ".join(r.get("drive_photo_links", []) or [])
         })
         
     payload = {
@@ -277,8 +317,56 @@ def fetch_cases_from_google_sheets(webhook_url: str) -> Tuple[bool, Any]:
                 "is_eligible": status == "符合資格",
                 "notes": f"⚠️ 本案件由雲端試算表復原，原始照片與確切送件時間已遺失。試算表最後同步時間：{sync_time or '未知'}",
                 "review_mode": "paper",  # 復原案件缺少原始照片，一律列為紙本審核
+                "drive_photo_links": [u.strip() for u in str(row.get("雲端硬碟連結", "") or "").split("|") if u.strip()],
                 "images": [],
                 "image_labels": [],
                 "submitted_at": sync_time or "未知（復原資料）",
             })
     return True, restored
+
+
+def upload_photos_to_drive(webhook_url: str, case_id: str, unit_level1: str, images: List[Any]) -> Tuple[bool, Any]:
+    """
+    把一筆案件的原始照片上傳到 Google 雲端硬碟 (透過 Apps Script Webhook)，讓照片不受 Streamlit
+    伺服器重啟影響。成功時回傳 (True, 雲端硬碟連結清單)；失敗時回傳 (False, 錯誤訊息字串)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    if not images:
+        return True, []
+
+    files = []
+    for idx, img in enumerate(images, 1):
+        try:
+            buf = io.BytesIO()
+            rgb_img = img.convert("RGB") if img.mode in ("RGBA", "P") else img
+            rgb_img.save(buf, "JPEG", quality=92)
+            files.append({
+                "filename": f"{case_id}_page{idx}.jpg",
+                "mimeType": "image/jpeg",
+                "data": base64.b64encode(buf.getvalue()).decode("ascii"),
+            })
+        except Exception as e:
+            return False, f"照片編碼失敗 (第 {idx} 張): {e}"
+
+    payload = {"action": "upload_photos", "case_id": case_id, "unit_level1": unit_level1 or "未分類單位", "files": files}
+    try:
+        resp = requests.post(
+            clean_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code not in (200, 302):
+        return False, f"上傳失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"上傳失敗：{data.get('error', '未知錯誤')}"
+    return True, data.get("links", [])
