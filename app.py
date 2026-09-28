@@ -1221,9 +1221,13 @@ else:
                 all_l1 = ["全部"] + list(df["大隊 / 局本部"].unique())
                 filter_l1 = st.selectbox("依大隊/局本部篩選：", all_l1, key="admin_flt_l1")
             with col_flt2:
-                status_filter = st.multiselect("依審核結果篩選：", ["符合資格", "待補件", "不符資格"], default=["符合資格", "待補件", "不符資格"], key="admin_flt_stat")
+                # 含資料中實際出現的其他狀態 (如「待審核」)，避免不在預設 3 種結果內的案件被篩選條件預設隱藏
+                status_options = list(dict.fromkeys(["符合資格", "待補件", "不符資格"] + list(df["審核結果"].unique())))
+                status_filter = st.multiselect("依審核結果篩選：", status_options, default=status_options, key="admin_flt_stat")
             with col_flt3:
-                cat_filter = st.multiselect("依組別篩選：", ["大專院校", "高中職", "國中", "國小"], default=["大專院校", "高中職", "國中", "國小"], key="admin_flt_cat")
+                # 含資料中實際出現的其他組別，避免不在預設 4 種組別內的案件被篩選條件預設隱藏
+                cat_options = list(dict.fromkeys(["大專院校", "高中職", "國中", "國小"] + list(df["組別"].unique())))
+                cat_filter = st.multiselect("依組別篩選：", cat_options, default=cat_options, key="admin_flt_cat")
 
             filtered_df = df[df["獎學金類別"].isin(type_filter) & df["審核結果"].isin(status_filter) & df["組別"].isin(cat_filter)]
             if filter_l1 != "全部":
