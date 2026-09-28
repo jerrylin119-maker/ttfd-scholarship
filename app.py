@@ -269,6 +269,28 @@ def sync_latest_to_google_sheets(webhook_url: str):
         return False, "目前系統內沒有任何案件資料，為避免清空雲端試算表，已略過同步"
     return sync_to_google_sheets(webhook_url, latest)
 
+def retry_failed_drive_uploads(webhook_url: str):
+    """
+    對「線上審核」但尚未成功備份至雲端硬碟的案件重新嘗試上傳。
+    只要本機 ./uploads/ 還留著原始照片檔案就能補救，不需要分隊重新上傳。
+    回傳 (成功案件編號清單, 失敗案件編號清單)。
+    """
+    records = load_stored_cases()
+    success_ids, fail_ids = [], []
+    for r in records:
+        if r.get("review_mode") != "online" or r.get("drive_photo_links") or not r.get("images"):
+            continue
+        ok, result = upload_photos_to_drive(webhook_url, r["id"], r.get("unit_level1", ""), r["images"])
+        if ok:
+            r["drive_photo_links"] = result
+            r.pop("drive_upload_error", None)
+            success_ids.append(r["id"])
+        else:
+            r["drive_upload_error"] = result
+            fail_ids.append(r["id"])
+        save_case_to_storage(r)
+    return success_ids, fail_ids
+
 def generate_case_id() -> str:
     """
     產生簡化版案件編號：{民國年}-{序號}，如 115-01、115-02...
@@ -1309,7 +1331,29 @@ else:
                                     st.success(f"🎉 {msg}")
                                 else:
                                     st.error(f"❌ {msg}")
-                            
+
+                st.caption("若先前因 Apps Script 缺少雲端硬碟授權導致照片備份失敗，補好授權後可用下方按鈕補救，不需請分隊重傳照片：")
+                if st.button("🔄 重新上傳尚未備份成功的照片至雲端硬碟", use_container_width=True):
+                    if not webhook_url:
+                        st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                    else:
+                        with st.spinner("正在重新嘗試上傳尚未備份的照片..."):
+                            success_ids, fail_ids = retry_failed_drive_uploads(webhook_url)
+                        if success_ids:
+                            st.success(f"✅ 已成功補上傳 {len(success_ids)} 筆案件的照片：{', '.join(success_ids)}")
+                            with st.spinner("正在同步最新結果至 Google 試算表..."):
+                                try:
+                                    sync_latest_to_google_sheets(webhook_url)
+                                except Exception:
+                                    pass
+                            st.session_state.records = load_stored_cases()
+                        if fail_ids:
+                            st.error(f"❌ 仍有 {len(fail_ids)} 筆案件上傳失敗，請檢查該案件的錯誤訊息：{', '.join(fail_ids)}")
+                        if not success_ids and not fail_ids:
+                            st.info("目前沒有需要補救的案件（可能本機照片檔案已遺失，須請分隊確認是否補送）。")
+                        if success_ids:
+                            st.rerun()
+
             with col_g2:
                 with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
                     st.markdown("""
