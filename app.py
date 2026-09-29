@@ -711,7 +711,14 @@ if not st.session_state.is_admin:
                     st.markdown(f"❌ <span style='color:#dc2626;font-weight:bold;'>{label}：缺漏（需補件）</span>", unsafe_allow_html=True)
                     
         st.markdown("---")
-        if status == "符合資格":
+        if rec.get("ai_failed"):
+            st.markdown('<div class="badge-pending">🟣 AI 智慧審查暫時無法使用</div>', unsafe_allow_html=True)
+            st.warning(
+                "⚠️ AI 系統目前暫時忙碌或無法使用，但**您的申請資料與照片已成功送出並永久存檔**，"
+                "上方案件編號請留存。以上欄位為系統暫時無法自動判讀、留空待人工確認的結果，"
+                "不代表資格不符，**請勿重新上傳**；後續將由大隊或業務科人工複核。"
+            )
+        elif status == "符合資格":
             st.markdown(f'<div class="badge-eligible">🟢 初步審查：符合資格</div> &nbsp; <b>{rec.get("review_reason")}</b>', unsafe_allow_html=True)
             st.success("🎉 您上傳的文件齊全且成績達標！資料已自動永久存檔並送出至大隊與業務科，請靜候後續核定通知。")
         elif status == "待補件":
@@ -760,6 +767,10 @@ if not st.session_state.is_admin:
 
     # 申請交件表單區
     st.markdown('<div class="section-title">📤 線上申請交件與照片上傳</div>', unsafe_allow_html=True)
+    st.caption(
+        "ℹ️ 若送出後看到「AI 智慧審查暫時無法使用」的提示，請放心：您的申請資料與照片**已經成功送出並安全存檔**，"
+        "會取得正式案件編號，**不需要重新上傳**，後續將由大隊或業務科人工複核，請留意複核結果。"
+    )
     
     # 獎學金類別選擇區
     st.markdown("##### 🏆 第一步：請選擇欲申請的獎學金類別")
