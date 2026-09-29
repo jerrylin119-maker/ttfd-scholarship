@@ -862,33 +862,45 @@ if not st.session_state.is_admin:
                 progress_bar = st.progress(0, text=f"正在整理 {len(all_prepared_images)} 個影像檔案...")
                 try:
                     progress_bar.progress(35, text="正在進行 AI 智慧多模態辨識與資料擷取...")
-                    
-                    ai_result = analyze_scholarship_documents(
-                        images=all_prepared_images,
-                        api_key=api_key_to_use,
-                        model_name="gemini-3.6-flash"
-                    )
-                    
-                    progress_bar.progress(75, text="正在比對審查標準與 5 項必備附件...")
-                    
-                    probe_case = {
-                        "scholarship_type": upload_scholarship_type,
-                        "applicant_name": ai_result.get("applicant_name", ""),
-                        "applicant_id": ai_result.get("applicant_id", ""),
-                        "child_name": ai_result.get("child_name", ""),
-                    }
-                    dups = find_duplicate_cases(probe_case)
-                    if dups:
-                        # 疑似重複：暫不存檔，先請同仁確認
-                        st.session_state.pending_submission = {
-                            "ai_result": ai_result, "images": all_prepared_images, "labels": all_prepared_labels,
-                            "type": upload_scholarship_type, "l1": upload_level1, "l2": upload_level2, "dups": dups,
+
+                    try:
+                        ai_result = analyze_scholarship_documents(
+                            images=all_prepared_images,
+                            api_key=api_key_to_use,
+                            model_name="gemini-3.6-flash"
+                        )
+                        ai_failed = False
+                    except Exception as ai_err:
+                        # AI 辨識失敗時，不要整筆丟掉：改建立一個「待人工複核」的案件，
+                        # 案號照樣產生、照片照樣存檔並備份雲端硬碟，只是欄位留空待大隊/業務科補上，
+                        # 之後可在後台一鍵「重新以 AI 分析」或直接手動輸入。
+                        ai_result = {
+                            "notes": f"⚠️ AI 智慧審查失敗，需人工複核或稍後重新分析（錯誤訊息：{ai_err}）",
                         }
-                        progress_bar.empty()
-                        st.rerun()
+                        ai_failed = True
+
+                    progress_bar.progress(75, text="正在比對審查標準與 5 項必備附件...")
+
+                    if not ai_failed:
+                        probe_case = {
+                            "scholarship_type": upload_scholarship_type,
+                            "applicant_name": ai_result.get("applicant_name", ""),
+                            "applicant_id": ai_result.get("applicant_id", ""),
+                            "child_name": ai_result.get("child_name", ""),
+                        }
+                        dups = find_duplicate_cases(probe_case)
+                        if dups:
+                            # 疑似重複：暫不存檔，先請同仁確認
+                            st.session_state.pending_submission = {
+                                "ai_result": ai_result, "images": all_prepared_images, "labels": all_prepared_labels,
+                                "type": upload_scholarship_type, "l1": upload_level1, "l2": upload_level2, "dups": dups,
+                            }
+                            progress_bar.empty()
+                            st.rerun()
 
                     new_case = build_new_case(ai_result, all_prepared_images, all_prepared_labels,
                                               upload_scholarship_type, upload_level1, upload_level2)
+                    new_case["ai_failed"] = ai_failed
 
                     # 💾 自動存入 ./uploads/ 與追加寫入 ./data/獎學金總表.xlsx，並同步雲端試算表
                     progress_bar.progress(90, text="正在儲存原始照片並同步總表...")
@@ -896,7 +908,14 @@ if not st.session_state.is_admin:
 
                     progress_bar.progress(100, text="✅ 交件成功並已永久存檔！")
                     time.sleep(0.5)
-                    st.balloons()
+                    if ai_failed:
+                        st.warning(
+                            f"⚠️ AI 自動判讀目前暫時無法使用，但您的照片與資料**已成功送出並存檔**，"
+                            f"案號為【{new_case['id']}】，請留存此編號。後續將由大隊或業務科人工複核，"
+                            f"不需要重新填寫或上傳。"
+                        )
+                    else:
+                        st.balloons()
                     st.rerun()
 
                 except Exception as e:
@@ -948,7 +967,10 @@ else:
             st.info("目前尚無任何案件資料。")
         else:
             case_options = {
-                r["id"]: f"【{r.get('id')}】[{r.get('scholarship_type', '未分類')}] [{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
+                r["id"]: (
+                    ("⚠️AI待複核 " if r.get("ai_failed") else "")
+                    + f"【{r.get('id')}】[{r.get('scholarship_type', '未分類')}] [{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
+                )
                 for r in my_records
             }
 
@@ -1011,7 +1033,33 @@ else:
             # 右側表單區
             with col_right:
                 st.markdown('<div class="section-title">✍️ 承辦人審核複核與狀態判定</div>', unsafe_allow_html=True)
-                
+
+                if curr_case.get("ai_failed"):
+                    st.warning("⚠️ 本案件送出時 AI 智慧審查暫時無法使用，以下欄位尚未自動填入，請人工核對左側原始文件後手動輸入，或點下方按鈕重新讓 AI 分析。")
+                    if curr_case.get("images") and st.button("🔄 重新以 AI 分析此案件", key=f"retry_ai_{curr_case['id']}"):
+                        retry_key = st.session_state.api_key or load_persistent_api_key()
+                        if not retry_key:
+                            st.error("❌ 系統尚未設定 API Key，請先於側邊欄設定！")
+                        else:
+                            with st.spinner("正在重新進行 AI 智慧多模態辨識..."):
+                                try:
+                                    retry_result = analyze_scholarship_documents(
+                                        images=curr_case["images"], api_key=retry_key, model_name="gemini-3.6-flash"
+                                    )
+                                    for k in ("applicant_name", "applicant_id", "child_name", "category",
+                                              "semester_gpa", "conduct", "attachments", "review_status",
+                                              "review_reason", "is_eligible"):
+                                        if k in retry_result:
+                                            curr_case[k] = retry_result[k]
+                                    curr_case["notes"] = retry_result.get("notes", "")
+                                    curr_case["ai_failed"] = False
+                                    st.session_state.records[curr_case_idx] = curr_case
+                                    save_case_to_storage(curr_case)
+                                    st.success("✅ AI 重新分析成功，欄位已自動更新！")
+                                    st.rerun()
+                                except Exception as retry_err:
+                                    st.error(f"❌ 重新分析仍然失敗：{retry_err}")
+
                 with st.form(key=f"admin_review_form_{curr_case['id']}"):
                     st.markdown("##### 📝 審核方式")
                     mode_list = ["線上審核", "紙本審核"]
@@ -1120,7 +1168,8 @@ else:
                         curr_case["review_status"] = calc_status
                         curr_case["review_reason"] = calc_reason
                         curr_case["is_eligible"] = is_elig
-                        
+                        curr_case["ai_failed"] = False
+
                         st.session_state.records[curr_case_idx] = curr_case
                         save_case_to_storage(curr_case)
                         st.success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
@@ -1208,7 +1257,7 @@ else:
                 table_rows.append({
                     "序號": idx,
                     "案件編號": r.get("id", ""),
-                    "審核方式": "紙本審核" if r.get("review_mode") == "paper" else "線上審核",
+                    "審核方式": ("⚠️AI待複核 " if r.get("ai_failed") else "") + ("紙本審核" if r.get("review_mode") == "paper" else "線上審核"),
                     "獎學金類別": r.get("scholarship_type", "未分類"),
                     "大隊 / 局本部": r.get("unit_level1", "未指定"),
                     "分隊 / 科室": r.get("unit_level2", "未指定"),
