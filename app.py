@@ -935,6 +935,15 @@ else:
 
     my_records = visible(st.session_state.records)   # 各大隊帳號只看得到自己大隊的案件
     records = my_records
+
+    ai_failed_cases = [r for r in my_records if r.get("ai_failed")]
+    if ai_failed_cases:
+        ai_failed_ids = "、".join(r.get("id", "") for r in ai_failed_cases)
+        st.warning(
+            f"⚠️ 有 **{len(ai_failed_cases)}** 筆案件送出時 AI 智慧審查暫時無法使用、尚待人工複核："
+            f"【{ai_failed_ids}】。請至「🔍 左圖右表」案件複核工作台開啟，手動輸入或點「重新以 AI 分析此案件」。"
+        )
+
     total_count = len(records)
     eligible_count = sum(1 for r in records if r.get("review_status") == "符合資格")
     pending_count = sum(1 for r in records if r.get("review_status") == "待補件")
