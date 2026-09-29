@@ -46,6 +46,7 @@ from org_structure import TAITUNG_FIRE_ORG, get_level1_units, get_level2_units, 
 from gemini_analyzer import (
     analyze_scholarship_documents,
     evaluate_eligibility,
+    list_available_gemini_models,
     ATTACHMENT_NAMES
 )
 import cloud_sync
@@ -623,6 +624,19 @@ with st.sidebar:
                         st.rerun()
                     else:
                         st.error("請先輸入有效的 API Key！")
+
+            with st.expander("🔧 診斷：列出目前 API Key 實際可用的 Gemini 模型", expanded=False):
+                st.caption("當同仁上傳文件出現「Gemini 模型呼叫失敗 404 NOT_FOUND」時，可用這個按鈕確認目前這組金鑰實際支援哪些模型名稱。")
+                if st.button("📋 查詢可用模型清單", use_container_width=True):
+                    with st.spinner("正在查詢 Google GenAI 可用模型..."):
+                        model_names, err = list_available_gemini_models(load_persistent_api_key())
+                    if err:
+                        st.error(f"❌ 查詢失敗：{err}")
+                    elif not model_names:
+                        st.warning("查無支援 generateContent 的模型。")
+                    else:
+                        st.success(f"共查到 {len(model_names)} 個可用模型：")
+                        st.code("\n".join(model_names))
 
         st.markdown("---")
         st.subheader("⚡ 資料管理")
