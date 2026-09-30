@@ -356,6 +356,11 @@ def fetch_cases_from_google_sheets(webhook_url: str) -> Tuple[bool, Any]:
     restored: List[Dict[str, Any]] = []
     for rows in (data.get("sheets") or {}).values():
         for row in rows:
+            # 只採用目前系統格式的分頁 (含「獎學金類別」欄)，略過試算表中更早期版本
+            # 遺留的舊分頁 (例如以大隊命名、或沒有類別欄的「總表」)，避免同一案件重複匯入、
+            # 或被舊格式的殘缺資料覆蓋回去。
+            if "獎學金類別" not in row:
+                continue
             case_id = str(row.get("案件編號", "")).strip()
             if not case_id:
                 continue
