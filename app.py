@@ -1051,7 +1051,7 @@ else:
                         st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失，或為雲端試算表復原案件），但已備份於雲端硬碟，請點下方連結查看原始照片：")
                         for i, link in enumerate(drive_links, 1):
                             st.markdown(f"- [第 {i} 張原始檔案]({link})")
-                        if st.button("📥 從雲端硬碟辨識並還原申請表", key=f"restore_drive_{curr_case['id']}"):
+                        if st.button("📥 從雲端硬碟下載照片並還原至系統", key=f"restore_drive_{curr_case['id']}"):
                             dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                             if not dl_webhook:
                                 st.error("❌ 系統尚未設定 Google 試算表 Webhook 網址！")
@@ -1062,25 +1062,22 @@ else:
                                     st.error(f"❌ 下載失敗：{dl_result}")
                                 else:
                                     fallback_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
-                                    kept_images, kept_labels = dl_result, fallback_labels
+                                    curr_case["images"] = dl_result
+                                    curr_case["image_labels"] = fallback_labels
+                                    # AI 先猜一個「可能是申請表」的頁面當預設檢視頁 (只是提示，不會自動丟掉其他張)，
+                                    # AI 偶爾會猜錯 (例如誤認成績單)，正式決定保留哪一張仍由承辦人在下方手動確認。
                                     id_key = st.session_state.get("api_key") or load_persistent_api_key()
-                                    # 只在畫面上保留申請表那一張 (其餘附件仍完整存在雲端硬碟)，
-                                    # 避免把整批還原的照片都塞回系統記憶體，重蹈今天當機的覆轍。
                                     if id_key and len(dl_result) > 1:
                                         try:
-                                            with st.spinner(f"正在用 AI 從 {len(dl_result)} 張照片中辨識申請表..."):
-                                                id_result = analyze_scholarship_documents(dl_result, id_key, "gemini-3.6-flash")
-                                            kept_images, kept_labels = select_keep_images(id_result, dl_result, fallback_labels)
-                                        except Exception as e:
-                                            st.caption(f"⚠️ AI 辨識申請表失敗（{e}），已保留全部 {len(dl_result)} 張照片。")
-                                    curr_case["images"] = kept_images
-                                    curr_case["image_labels"] = kept_labels
+                                            id_result = analyze_scholarship_documents(dl_result, id_key, "gemini-3.6-flash")
+                                            idx = int(id_result.get("application_form_image_index") or 0)
+                                            if 1 <= idx <= len(dl_result):
+                                                curr_case["_suggested_form_idx"] = idx - 1
+                                        except Exception:
+                                            pass
                                     st.session_state.records[curr_case_idx] = curr_case
                                     save_case_to_storage(curr_case)
-                                    if len(kept_images) < len(dl_result):
-                                        st.success(f"✅ 已從雲端硬碟還原，AI 從 {len(dl_result)} 張照片中挑出申請表顯示，其餘仍完整備份於雲端硬碟。")
-                                    else:
-                                        st.success(f"✅ 已從雲端硬碟還原 {len(kept_images)} 張照片！")
+                                    st.success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
                                     st.rerun()
                     elif curr_case.get("review_mode") == "online":
                         st.warning("⚠️ 此案件應為線上審核但無附加圖片檔案，請確認申請人是否已完成線上上傳；如確定改採紙本審核，請於右側「審核方式」調整。")
@@ -1089,16 +1086,30 @@ else:
                 else:
                     if len(images) > 1:
                         labels = [image_labels[i] if i < len(image_labels) else f"照片 {i+1}" for i in range(len(images))]
+                        suggested_idx = curr_case.get("_suggested_form_idx")
+                        default_idx = suggested_idx if isinstance(suggested_idx, int) and 0 <= suggested_idx < len(images) else 0
                         selected_img_idx = st.radio(
                             "選擇檢視頁面：",
                             range(len(images)),
+                            index=default_idx,
                             format_func=lambda i: f"📄 {labels[i]}",
                             horizontal=True,
-                            key="admin_img_select"
+                            key=f"admin_img_select_{curr_case['id']}"
                         )
+                        if drive_links and st.button(
+                            f"📌 只保留「{labels[selected_img_idx]}」為申請表，其餘從本機移除（雲端硬碟仍保留全部原圖）",
+                            key=f"trim_to_form_{curr_case['id']}"
+                        ):
+                            curr_case["images"] = [images[selected_img_idx]]
+                            curr_case["image_labels"] = [labels[selected_img_idx]]
+                            curr_case.pop("_suggested_form_idx", None)
+                            st.session_state.records[curr_case_idx] = curr_case
+                            save_case_to_storage(curr_case)
+                            st.success("✅ 已保留申請表影像，其餘照片仍完整備份於雲端硬碟。")
+                            st.rerun()
                     else:
                         selected_img_idx = 0
-                        
+
                     target_img = images[selected_img_idx]
                     st.image(target_img, use_container_width=True, caption=f"原檔 - {image_labels[selected_img_idx] if selected_img_idx < len(image_labels) else f'照片 {selected_img_idx+1}'}")
                     if drive_links:
