@@ -1065,6 +1065,25 @@ else:
 
                 drive_links = curr_case.get("drive_photo_links") or []
 
+                marked_url = curr_case.get("marked_form_drive_url")
+                if marked_url:
+                    st.success("✅ 偵測到人工標記的申請表照片，可直接精準下載這一張（不用整批下載）：")
+                    if st.button("📥 下載已標記的申請表", key=f"restore_marked_{curr_case['id']}"):
+                        marked_dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                        with st.spinner("正在下載標記的申請表..."):
+                            ok_dl, dl_result = download_photos_from_drive(marked_dl_webhook, [marked_url])
+                        if ok_dl and dl_result:
+                            curr_case["images"] = dl_result
+                            curr_case["image_labels"] = ["獎學金申請表"]
+                            curr_case.pop("marked_form_drive_url", None)
+                            curr_case.pop("_suggested_form_idx", None)
+                            st.session_state.records[curr_case_idx] = curr_case
+                            save_case_to_storage(curr_case)
+                            st.success("✅ 已下載標記的申請表！")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ 下載失敗：{dl_result}")
+
                 def _restore_all_from_drive():
                     dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                     if not dl_webhook:
@@ -1099,23 +1118,6 @@ else:
                         st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失，或為雲端試算表復原案件），但已備份於雲端硬碟，請點下方連結查看原始照片：")
                         for i, link in enumerate(drive_links, 1):
                             st.markdown(f"- [第 {i} 張原始檔案]({link})")
-                        marked_url = curr_case.get("marked_form_drive_url")
-                        if marked_url:
-                            st.success("✅ 偵測到人工標記的申請表照片，可直接精準下載這一張（不用整批下載）：")
-                            if st.button("📥 下載已標記的申請表", key=f"restore_marked_{curr_case['id']}"):
-                                marked_dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-                                with st.spinner("正在下載標記的申請表..."):
-                                    ok_dl, dl_result = download_photos_from_drive(marked_dl_webhook, [marked_url])
-                                if ok_dl and dl_result:
-                                    curr_case["images"] = dl_result
-                                    curr_case["image_labels"] = ["獎學金申請表"]
-                                    curr_case.pop("marked_form_drive_url", None)
-                                    st.session_state.records[curr_case_idx] = curr_case
-                                    save_case_to_storage(curr_case)
-                                    st.success("✅ 已下載標記的申請表！")
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ 下載失敗：{dl_result}")
                         if st.button("📥 從雲端硬碟下載照片並還原至系統", key=f"restore_drive_{curr_case['id']}"):
                             _restore_all_from_drive()
                     elif curr_case.get("review_mode") == "online":
@@ -1652,7 +1654,10 @@ else:
                                     r["drive_photo_links"] = links
                                     relinked.append(case_id)
                                     changed = True
-                            if not r.get("images") and case_id in form_by_case:
+                            # 不論這筆案件本機目前有沒有照片 (即使之前已下載過、甚至下載到錯的那張)，
+                            # 只要雲端硬碟裡有人工標記的申請表，都記下連結；要不要真的套用，
+                            # 由承辦人在案件畫面上看到選項後自己決定點擊。
+                            if case_id in form_by_case and r.get("marked_form_drive_url") != form_by_case[case_id]["url"]:
                                 r["marked_form_drive_url"] = form_by_case[case_id]["url"]
                                 marked.append(case_id)
                                 changed = True
