@@ -237,13 +237,35 @@ def build_new_case(ai_result, images, labels, stype, l1, l2) -> dict:
         "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-def finalize_submission(new_case: dict):
+def select_keep_images(ai_result, images, labels):
+    """
+    只挑出「獎學金申請表」那一張影像留在系統本機（供左圖右表複核時檢視），其餘附件影像
+    不長期保留：AI 已完成缺件檢核（attachments 欄位），原圖也已完整備份於雲端硬碟，
+    不需要在系統裡把每筆案件的 5～7 張大圖都留著，避免案件數增加後拖垮伺服器記憶體。
+    找不到 AI 判斷的申請表頁碼時，保底保留第 1 張，確保案件至少有一張影像可供快速檢視。
+    """
+    if not images:
+        return [], []
+    idx = ai_result.get("application_form_image_index")
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        idx = 0
+    if 1 <= idx <= len(images):
+        pick = idx - 1
+    else:
+        pick = 0
+    label = labels[pick] if pick < len(labels) else "獎學金申請表"
+    return [images[pick]], [label]
+
+def finalize_submission(new_case: dict, drive_images=None):
     """上傳照片至雲端硬碟（若已設定）→ 存檔 → 更新畫面狀態 → 自動同步雲端試算表"""
     webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-    if webhook_url and new_case.get("images"):
+    images_for_drive = drive_images if drive_images is not None else new_case.get("images")
+    if webhook_url and images_for_drive:
         try:
             ok_upload, upload_result = upload_photos_to_drive(
-                webhook_url, new_case["id"], new_case.get("unit_level1", ""), new_case["images"]
+                webhook_url, new_case["id"], new_case.get("unit_level1", ""), images_for_drive
             )
             if ok_upload:
                 new_case["drive_photo_links"] = upload_result
@@ -755,8 +777,9 @@ if not st.session_state.is_admin:
         col_p1, col_p2 = st.columns(2)
         with col_p1:
             if st.button("✅ 這是補件／更正，仍要送出", use_container_width=True, type="primary", key="pend_confirm"):
-                new_case = build_new_case(pend["ai_result"], pend["images"], pend["labels"], pend["type"], pend["l1"], pend["l2"])
-                finalize_submission(new_case)
+                kept_images, kept_labels = select_keep_images(pend["ai_result"], pend["images"], pend["labels"])
+                new_case = build_new_case(pend["ai_result"], kept_images, kept_labels, pend["type"], pend["l1"], pend["l2"])
+                finalize_submission(new_case, drive_images=pend["images"])
                 st.balloons()
                 st.rerun()
         with col_p2:
@@ -910,13 +933,15 @@ if not st.session_state.is_admin:
                             progress_bar.empty()
                             st.rerun()
 
-                    new_case = build_new_case(ai_result, all_prepared_images, all_prepared_labels,
+                    kept_images, kept_labels = select_keep_images(ai_result, all_prepared_images, all_prepared_labels)
+                    new_case = build_new_case(ai_result, kept_images, kept_labels,
                                               upload_scholarship_type, upload_level1, upload_level2)
                     new_case["ai_failed"] = ai_failed
 
                     # 💾 自動存入 ./uploads/ 與追加寫入 ./data/獎學金總表.xlsx，並同步雲端試算表
+                    # (雲端硬碟仍會備份全部原始照片，本機只留「獎學金申請表」那一張以節省記憶體)
                     progress_bar.progress(90, text="正在儲存原始照片並同步總表...")
-                    finalize_submission(new_case)
+                    finalize_submission(new_case, drive_images=all_prepared_images)
 
                     progress_bar.progress(100, text="✅ 交件成功並已永久存檔！")
                     time.sleep(0.5)
@@ -1061,7 +1086,9 @@ else:
                     target_img = images[selected_img_idx]
                     st.image(target_img, use_container_width=True, caption=f"原檔 - {image_labels[selected_img_idx] if selected_img_idx < len(image_labels) else f'照片 {selected_img_idx+1}'}")
                     if drive_links:
-                        with st.expander("☁️ 雲端硬碟備份連結"):
+                        if len(images) < len(drive_links):
+                            st.caption(f"ℹ️ 系統僅保留「獎學金申請表」影像於本機（節省伺服器記憶體），其餘 {len(drive_links) - len(images)} 項附件已由 AI 檢核存在與否，如需查看原圖請展開下方連結。")
+                        with st.expander("☁️ 雲端硬碟備份連結（含全部附件原圖）"):
                             for i, link in enumerate(drive_links, 1):
                                 st.markdown(f"- [第 {i} 張原始檔案]({link})")
                     elif curr_case.get("drive_upload_error"):
@@ -1239,9 +1266,9 @@ else:
                     
             with st.spinner("AI 解析並存檔中..."):
                 ai_res = analyze_scholarship_documents(admin_imgs, st.session_state.api_key, "gemini-3.6-flash")
-                case_id = generate_case_id()
+                kept_admin_images, kept_admin_labels = select_keep_images(ai_res, admin_imgs, admin_lbls)
                 new_c = {
-                    "id": case_id,
+                    "id": generate_case_id(),
                     "scholarship_type": admin_upload_scholarship_type,
                     "unit_level1": admin_upload_l1,
                     "unit_level2": admin_upload_l2,
@@ -1257,13 +1284,11 @@ else:
                     "is_eligible": ai_res.get("is_eligible", False),
                     "notes": ai_res.get("notes", ""),
                     "review_mode": "online",
-                    "images": admin_imgs,
-                    "image_labels": admin_lbls,
+                    "images": kept_admin_images,
+                    "image_labels": kept_admin_labels,
                     "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                save_case_to_storage(new_c)
-                st.session_state.records.append(new_c)
-                st.session_state.selected_case_id = new_c["id"]
+                finalize_submission(new_c, drive_images=admin_imgs)
                 st.success(f"✅ 成功加入案件【{new_c['id']}】並存入 ./uploads/ 與總表！")
                 st.rerun()
 
