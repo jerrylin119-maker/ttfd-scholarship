@@ -28,6 +28,9 @@ function doGet(e) {
   if (action === "export") {
     return exportAllSheets_();
   }
+  if (action === "list_photos") {
+    return listAllPhotos_();
+  }
   return ContentService.createTextOutput(JSON.stringify({
     status: "ok",
     message: "🚒 臺東縣消防局 獎學金同步 Webhook 連線正常！"
@@ -262,6 +265,35 @@ function downloadPhotos_(data) {
   }
   return ContentService.createTextOutput(JSON.stringify({status: "ok", files: files}))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// 掃描 PHOTO_ROOT_FOLDER_ID 底下所有大隊子資料夾的照片檔案，依檔名 (案件編號_pageN.jpg) 歸類，
+// 回傳「案件編號 -> 連結清單」對照表。用於批次補回因本機資料遺失、連結記錄跟著不見，
+// 但照片其實仍安好存在雲端硬碟裡的案件，不需要逐筆手動搜尋。
+function listAllPhotos_() {
+  try {
+    var root = DriveApp.getFolderById(PHOTO_ROOT_FOLDER_ID);
+    var byCase = {};
+    var subfolders = root.getFolders();
+    while (subfolders.hasNext()) {
+      var folder = subfolders.next();
+      var files = folder.getFiles();
+      while (files.hasNext()) {
+        var f = files.next();
+        var m = f.getName().match(/^(.+?)_page\\d+/);
+        if (m) {
+          var caseId = m[1];
+          if (!byCase[caseId]) byCase[caseId] = [];
+          byCase[caseId].push(f.getUrl());
+        }
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", files_by_case: byCase}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
 }
 """
 
@@ -526,6 +558,30 @@ def download_photos_from_drive(webhook_url: str, drive_links: List[str]) -> Tupl
     if not images:
         return False, f"下載失敗：{'; '.join(errors) if errors else '未知錯誤'}"
     return True, images
+
+
+def list_drive_photos_by_case(webhook_url: str) -> Tuple[bool, Any]:
+    """
+    掃描雲端硬碟整個照片資料夾，依檔名 (案件編號_pageN.jpg) 建立「案件編號 -> 連結清單」對照表。
+    用於批次補回「照片其實已備份在雲端硬碟、但系統本機記錄的連結遺失」的案件，
+    不需要逐筆手動搜尋。成功時回傳 (True, {案件編號: [連結, ...]})；失敗時回傳 (False, 錯誤訊息)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    try:
+        resp = requests.get(clean_url, params={"action": "list_photos"}, timeout=60, allow_redirects=True)
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code != 200:
+        return False, f"讀取失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"讀取失敗：{data.get('error', '未知錯誤')}"
+    return True, data.get("files_by_case", {})
 
 
 def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:

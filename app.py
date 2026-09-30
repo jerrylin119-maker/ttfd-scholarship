@@ -57,6 +57,7 @@ from cloud_sync import (
     fetch_cases_from_google_sheets,
     upload_photos_to_drive,
     download_photos_from_drive,
+    list_drive_photos_by_case,
     delete_from_google_sheets,
     GOOGLE_APPS_SCRIPT_TEMPLATE,
 )
@@ -1531,6 +1532,38 @@ else:
                                 f"原始照片無法復原，請通知相關分隊確認是否需要補送。"
                             )
                             st.rerun()
+
+            st.markdown("---")
+            st.markdown('<div class="section-title">🔗 批次比對雲端硬碟，補回遺失的照片連結</div>', unsafe_allow_html=True)
+            st.caption(
+                "適用於：案件的照片其實已經備份在雲端硬碟，但系統本機記錄的「雲端硬碟連結」不見了（例如先前伺服器當機、"
+                "又從雲端試算表復原文字資料的案件）。這裡會依雲端硬碟裡的檔名（案件編號_page1.jpg 這種格式）自動比對回每一筆案件，"
+                "一次把所有案件的連結補回來，不需要逐筆手動搜尋；比對完之後，要看哪一筆的照片，再個別點「📥 從雲端硬碟下載照片並還原至系統」即可。"
+            )
+            if st.button("🔗 立即比對雲端硬碟並補回連結", use_container_width=True):
+                if not webhook_url:
+                    st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                else:
+                    with st.spinner("正在掃描雲端硬碟所有照片檔案..."):
+                        ok_scan, scan_result = list_drive_photos_by_case(webhook_url)
+                    if not ok_scan:
+                        st.error(f"❌ {scan_result}")
+                    else:
+                        relinked = []
+                        for r in st.session_state.records:
+                            if r.get("drive_photo_links") or r.get("images"):
+                                continue
+                            links = scan_result.get(str(r.get("id", "")))
+                            if links:
+                                r["drive_photo_links"] = links
+                                save_case_to_storage(r)
+                                relinked.append(r["id"])
+                        if relinked:
+                            st.success(f"✅ 已為 {len(relinked)} 筆案件補回雲端硬碟連結：{', '.join(relinked)}")
+                            st.session_state.records = load_stored_cases()
+                            st.rerun()
+                        else:
+                            st.info("目前沒有「本機沒照片、雲端硬碟又有對應檔案」的案件需要補連結。")
 
         if can_manage_system():
             st.markdown("---")
