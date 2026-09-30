@@ -211,14 +211,21 @@ def analyze_scholarship_documents(
                 break
         except Exception as e:
             err_text = str(e)
+            # 免費方案的額度通常是整個專案共用，一旦某個模型回報額度用完 (429 RESOURCE_EXHAUSTED)，
+            # 繼續嘗試其他模型幾乎必然也是同樣結果，只會白白多打好幾次 API、讓額度更難恢復，故直接停止重試。
+            is_quota_error = "RESOURCE_EXHAUSTED" in err_text or " 429" in err_text or err_text.startswith("429")
             if len(err_text) > 150:
                 err_text = err_text[:150] + "..."
             attempt_errors.append(f"{model_to_try}: {err_text}")
+            if is_quota_error:
+                break
             continue
 
     if not response_text:
         detail = " ｜ ".join(attempt_errors) if attempt_errors else "未知錯誤"
-        raise RuntimeError(f"Gemini 模型呼叫失敗，已嘗試 {len(candidate_models)} 個模型皆失敗：{detail}")
+        if any("RESOURCE_EXHAUSTED" in e or " 429" in e for e in attempt_errors):
+            raise RuntimeError(f"Gemini API 額度已用完 (429 RESOURCE_EXHAUSTED)，請至 Google AI Studio 檢查用量與帳單設定後再試：{detail}")
+        raise RuntimeError(f"Gemini 模型呼叫失敗，已嘗試 {len(attempt_errors)} 個模型皆失敗：{detail}")
     
     # 解析 JSON
     result = parse_gemini_json_response(response_text)
