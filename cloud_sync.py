@@ -268,27 +268,34 @@ function downloadPhotos_(data) {
 }
 
 // 掃描 PHOTO_ROOT_FOLDER_ID 底下所有大隊子資料夾的照片檔案，依檔名 (案件編號_pageN.jpg) 歸類，
-// 回傳「案件編號 -> 連結清單」對照表。用於批次補回因本機資料遺失、連結記錄跟著不見，
+// 回傳「案件編號 -> 連結清單」對照表 (files_by_case)。用於批次補回因本機資料遺失、連結記錄跟著不見，
 // 但照片其實仍安好存在雲端硬碟裡的案件，不需要逐筆手動搜尋。
+// 另外，若承辦人已手動把某張照片的檔名加上「申請表」三個字做標記 (例如 115-30_page3_申請表.jpg)，
+// 一併整理成 form_by_case (案件編號 -> {id, url})，讓系統可以只精準下載那一張，不用整批照片都抓。
 function listAllPhotos_() {
   try {
     var root = DriveApp.getFolderById(PHOTO_ROOT_FOLDER_ID);
     var byCase = {};
+    var formByCase = {};
     var subfolders = root.getFolders();
     while (subfolders.hasNext()) {
       var folder = subfolders.next();
       var files = folder.getFiles();
       while (files.hasNext()) {
         var f = files.next();
-        var m = f.getName().match(/^(.+?)_page\\d+/);
+        var name = f.getName();
+        var m = name.match(/^(.+?)_page\\d+/);
         if (m) {
           var caseId = m[1];
           if (!byCase[caseId]) byCase[caseId] = [];
           byCase[caseId].push(f.getUrl());
+          if (name.indexOf("申請表") !== -1) {
+            formByCase[caseId] = {id: f.getId(), url: f.getUrl()};
+          }
         }
       }
     }
-    return ContentService.createTextOutput(JSON.stringify({status: "ok", files_by_case: byCase}))
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", files_by_case: byCase, form_by_case: formByCase}))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
@@ -564,7 +571,10 @@ def list_drive_photos_by_case(webhook_url: str) -> Tuple[bool, Any]:
     """
     掃描雲端硬碟整個照片資料夾，依檔名 (案件編號_pageN.jpg) 建立「案件編號 -> 連結清單」對照表。
     用於批次補回「照片其實已備份在雲端硬碟、但系統本機記錄的連結遺失」的案件，
-    不需要逐筆手動搜尋。成功時回傳 (True, {案件編號: [連結, ...]})；失敗時回傳 (False, 錯誤訊息)。
+    不需要逐筆手動搜尋。
+    若承辦人已手動把某張照片的檔名標記「申請表」三個字 (例如 115-30_page3_申請表.jpg)，
+    也會一併整理出 form_by_case (案件編號 -> {id, url})，可用來只精準下載那一張。
+    成功時回傳 (True, {"files_by_case": {...}, "form_by_case": {...}})；失敗時回傳 (False, 錯誤訊息)。
     """
     clean_url = webhook_url.strip() if webhook_url else ""
     if not clean_url or not clean_url.startswith("http"):
@@ -581,7 +591,10 @@ def list_drive_photos_by_case(webhook_url: str) -> Tuple[bool, Any]:
         return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
     if data.get("status") != "ok":
         return False, f"讀取失敗：{data.get('error', '未知錯誤')}"
-    return True, data.get("files_by_case", {})
+    return True, {
+        "files_by_case": data.get("files_by_case", {}),
+        "form_by_case": data.get("form_by_case", {}),
+    }
 
 
 def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:

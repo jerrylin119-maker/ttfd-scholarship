@@ -1582,7 +1582,11 @@ else:
             st.caption(
                 "適用於：案件的照片其實已經備份在雲端硬碟，但系統本機記錄的「雲端硬碟連結」不見了（例如先前伺服器當機、"
                 "又從雲端試算表復原文字資料的案件）。這裡會依雲端硬碟裡的檔名（案件編號_page1.jpg 這種格式）自動比對回每一筆案件，"
-                "一次把所有案件的連結補回來，不需要逐筆手動搜尋；比對完之後，要看哪一筆的照片，再個別點「📥 從雲端硬碟下載照片並還原至系統」即可。"
+                "一次把所有案件的連結補回來，不需要逐筆手動搜尋。"
+            )
+            st.caption(
+                "💡 若您已人工到雲端硬碟把某案件申請表那張照片的檔名加上「申請表」三個字（例如 115-30_page3_申請表.jpg），"
+                "這裡會直接精準下載那一張存回系統，不需要下載整批照片、也不用靠 AI 猜。"
             )
             if st.button("🔗 立即比對雲端硬碟並補回連結", use_container_width=True):
                 if not webhook_url:
@@ -1593,21 +1597,36 @@ else:
                     if not ok_scan:
                         st.error(f"❌ {scan_result}")
                     else:
-                        relinked = []
+                        files_by_case = scan_result.get("files_by_case", {})
+                        form_by_case = scan_result.get("form_by_case", {})
+                        relinked, form_restored = [], []
                         for r in st.session_state.records:
-                            if r.get("drive_photo_links") or r.get("images"):
-                                continue
-                            links = scan_result.get(str(r.get("id", "")))
-                            if links:
-                                r["drive_photo_links"] = links
-                                save_case_to_storage(r)
-                                relinked.append(r["id"])
+                            case_id = str(r.get("id", ""))
+                            if not r.get("drive_photo_links") and not r.get("images"):
+                                links = files_by_case.get(case_id)
+                                if links:
+                                    r["drive_photo_links"] = links
+                                    save_case_to_storage(r)
+                                    relinked.append(case_id)
+                            if not r.get("images") and case_id in form_by_case:
+                                with st.spinner(f"正在下載 {case_id} 標記的申請表..."):
+                                    ok_dl, dl_result = download_photos_from_drive(
+                                        webhook_url, [form_by_case[case_id]["url"]]
+                                    )
+                                if ok_dl and dl_result:
+                                    r["images"] = dl_result
+                                    r["image_labels"] = ["獎學金申請表"]
+                                    save_case_to_storage(r)
+                                    form_restored.append(case_id)
                         if relinked:
                             st.success(f"✅ 已為 {len(relinked)} 筆案件補回雲端硬碟連結：{', '.join(relinked)}")
+                        if form_restored:
+                            st.success(f"✅ 已依人工標記精準下載申請表：{', '.join(form_restored)}")
+                        if relinked or form_restored:
                             st.session_state.records = load_stored_cases()
                             st.rerun()
                         else:
-                            st.info("目前沒有「本機沒照片、雲端硬碟又有對應檔案」的案件需要補連結。")
+                            st.info("目前沒有需要補連結、或有標記申請表待下載的案件。")
 
         if can_manage_system():
             st.markdown("---")
