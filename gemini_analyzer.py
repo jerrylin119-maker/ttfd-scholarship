@@ -176,15 +176,19 @@ def analyze_scholarship_documents(
         if m not in candidate_models:
             candidate_models.append(m)
             
-    last_error = None
     response_text = None
     used_model = None
-    
+    attempt_errors = []  # 記錄「每一個」候選模型各自失敗的原因，而不是只留下最後一個，
+                          # 避免真正的問題 (例如第一個模型的配額/權限錯誤) 被後面模型的錯誤蓋掉、誤導排查方向。
+
     for model_to_try in candidate_models:
+        # 明確補上 "models/" 前綴：現行 SDK 對裸名稱 (如 "gemini-2.5-flash") 通常會自動正規化，
+        # 但明確帶上前綴對已經有前綴的名稱是無害的 (SDK 偵測到已有前綴就直接使用)，多一層保險。
+        api_model_name = model_to_try if model_to_try.startswith("models/") else f"models/{model_to_try}"
         try:
             try:
                 response = client.models.generate_content(
-                    model=model_to_try,
+                    model=api_model_name,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
@@ -195,7 +199,7 @@ def analyze_scholarship_documents(
                 response_text = response.text
             except Exception:
                 response = client.models.generate_content(
-                    model=model_to_try,
+                    model=api_model_name,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
@@ -203,16 +207,20 @@ def analyze_scholarship_documents(
                     )
                 )
                 response_text = response.text
-                
+
             if response_text:
                 used_model = model_to_try
                 break
         except Exception as e:
-            last_error = e
+            err_text = str(e)
+            if len(err_text) > 150:
+                err_text = err_text[:150] + "..."
+            attempt_errors.append(f"{model_to_try}: {err_text}")
             continue
-            
+
     if not response_text:
-        raise RuntimeError(f"Gemini 模型呼叫失敗，最後錯誤: {str(last_error)}")
+        detail = " ｜ ".join(attempt_errors) if attempt_errors else "未知錯誤"
+        raise RuntimeError(f"Gemini 模型呼叫失敗，已嘗試 {len(candidate_models)} 個模型皆失敗：{detail}")
     
     # 解析 JSON
     result = parse_gemini_json_response(response_text)
