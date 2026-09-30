@@ -5,8 +5,10 @@
 import base64
 import io
 import json
-from typing import List, Dict, Any, Tuple
+import re
+from typing import List, Dict, Any, Optional, Tuple
 import requests
+from PIL import Image
 
 GOOGLE_APPS_SCRIPT_TEMPLATE = """
 // === 請將以下程式碼貼入 Google 試算表的「擴充功能」->「Apps Script」並部署為「網路應用程式」===
@@ -180,6 +182,9 @@ function doPost(e) {
     if (data.action === "delete_records") {
       return deleteRecords_(data);
     }
+    if (data.action === "download_photos") {
+      return downloadPhotos_(data);
+    }
     return syncAll_(data);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
@@ -234,6 +239,28 @@ function uploadPhotos_(data) {
     links.push(file.getUrl());
   }
   return ContentService.createTextOutput(JSON.stringify({status: "ok", links: links}))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// 依雲端硬碟檔案 ID 清單，把原始照片下載回來 (用於本機資料遺失後，把雲端硬碟裡的照片還原回系統)
+function downloadPhotos_(data) {
+  var ids = data.file_ids || [];
+  var files = [];
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      var file = DriveApp.getFileById(ids[i]);
+      var blob = file.getBlob();
+      files.push({
+        file_id: ids[i],
+        filename: file.getName(),
+        mimeType: blob.getContentType(),
+        data: Utilities.base64Encode(blob.getBytes())
+      });
+    } catch (err) {
+      files.push({file_id: ids[i], error: err.toString()});
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify({status: "ok", files: files}))
     .setMimeType(ContentService.MimeType.JSON);
 }
 """
@@ -441,6 +468,64 @@ def upload_photos_to_drive(webhook_url: str, case_id: str, unit_level1: str, ima
     if data.get("status") != "ok":
         return False, f"上傳失敗：{data.get('error', '未知錯誤')}"
     return True, data.get("links", [])
+
+
+def _extract_drive_file_id(url: str) -> Optional[str]:
+    """從 Google 雲端硬碟連結 (如 .../file/d/FILE_ID/view) 擷取檔案 ID"""
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", str(url or ""))
+    return m.group(1) if m else None
+
+
+def download_photos_from_drive(webhook_url: str, drive_links: List[str]) -> Tuple[bool, Any]:
+    """
+    依雲端硬碟連結清單，把原始照片下載回來還原成 PIL Image 清單。
+    用於本機資料遺失（伺服器重啟）後，把已備份在雲端硬碟的照片重新補回案件裡，
+    不需要請分隊重新拍照上傳。成功時回傳 (True, PIL Image 清單)；失敗時回傳 (False, 錯誤訊息)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    file_ids = [_extract_drive_file_id(u) for u in (drive_links or [])]
+    file_ids = [f for f in file_ids if f]
+    if not file_ids:
+        return False, "沒有可用的雲端硬碟連結"
+
+    payload = {"action": "download_photos", "file_ids": file_ids}
+    try:
+        resp = requests.post(
+            clean_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=90,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code not in (200, 302):
+        return False, f"下載失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"下載失敗：{data.get('error', '未知錯誤')}"
+
+    images = []
+    errors = []
+    for f in data.get("files", []):
+        if f.get("error"):
+            errors.append(f.get("error"))
+            continue
+        try:
+            img_bytes = base64.b64decode(f["data"])
+            img = Image.open(io.BytesIO(img_bytes))
+            img.load()
+            images.append(img)
+        except Exception as e:
+            errors.append(str(e))
+    if not images:
+        return False, f"下載失敗：{'; '.join(errors) if errors else '未知錯誤'}"
+    return True, images
 
 
 def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:
