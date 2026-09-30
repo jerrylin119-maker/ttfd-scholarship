@@ -1046,44 +1046,52 @@ else:
                 image_labels = curr_case.get("image_labels", [])
                 
                 drive_links = curr_case.get("drive_photo_links") or []
+
+                def _restore_all_from_drive():
+                    dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                    if not dl_webhook:
+                        st.error("❌ 系統尚未設定 Google 試算表 Webhook 網址！")
+                        return
+                    with st.spinner("正在從雲端硬碟下載原始照片..."):
+                        ok_dl, dl_result = download_photos_from_drive(dl_webhook, drive_links)
+                    if not ok_dl:
+                        st.error(f"❌ 下載失敗：{dl_result}")
+                        return
+                    fallback_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
+                    curr_case["images"] = dl_result
+                    curr_case["image_labels"] = fallback_labels
+                    # AI 先猜一個「可能是申請表」的頁面當預設檢視頁 (只是提示，不會自動丟掉其他張)，
+                    # AI 偶爾會猜錯 (例如誤認成績單)，正式決定保留哪一張仍由承辦人在下方手動確認。
+                    id_key = st.session_state.get("api_key") or load_persistent_api_key()
+                    if id_key and len(dl_result) > 1:
+                        try:
+                            id_result = analyze_scholarship_documents(dl_result, id_key, "gemini-3.6-flash")
+                            idx = int(id_result.get("application_form_image_index") or 0)
+                            if 1 <= idx <= len(dl_result):
+                                curr_case["_suggested_form_idx"] = idx - 1
+                        except Exception:
+                            pass
+                    st.session_state.records[curr_case_idx] = curr_case
+                    save_case_to_storage(curr_case)
+                    st.success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
+                    st.rerun()
+
                 if not images:
                     if drive_links:
                         st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失，或為雲端試算表復原案件），但已備份於雲端硬碟，請點下方連結查看原始照片：")
                         for i, link in enumerate(drive_links, 1):
                             st.markdown(f"- [第 {i} 張原始檔案]({link})")
                         if st.button("📥 從雲端硬碟下載照片並還原至系統", key=f"restore_drive_{curr_case['id']}"):
-                            dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
-                            if not dl_webhook:
-                                st.error("❌ 系統尚未設定 Google 試算表 Webhook 網址！")
-                            else:
-                                with st.spinner("正在從雲端硬碟下載原始照片..."):
-                                    ok_dl, dl_result = download_photos_from_drive(dl_webhook, drive_links)
-                                if not ok_dl:
-                                    st.error(f"❌ 下載失敗：{dl_result}")
-                                else:
-                                    fallback_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
-                                    curr_case["images"] = dl_result
-                                    curr_case["image_labels"] = fallback_labels
-                                    # AI 先猜一個「可能是申請表」的頁面當預設檢視頁 (只是提示，不會自動丟掉其他張)，
-                                    # AI 偶爾會猜錯 (例如誤認成績單)，正式決定保留哪一張仍由承辦人在下方手動確認。
-                                    id_key = st.session_state.get("api_key") or load_persistent_api_key()
-                                    if id_key and len(dl_result) > 1:
-                                        try:
-                                            id_result = analyze_scholarship_documents(dl_result, id_key, "gemini-3.6-flash")
-                                            idx = int(id_result.get("application_form_image_index") or 0)
-                                            if 1 <= idx <= len(dl_result):
-                                                curr_case["_suggested_form_idx"] = idx - 1
-                                        except Exception:
-                                            pass
-                                    st.session_state.records[curr_case_idx] = curr_case
-                                    save_case_to_storage(curr_case)
-                                    st.success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
-                                    st.rerun()
+                            _restore_all_from_drive()
                     elif curr_case.get("review_mode") == "online":
                         st.warning("⚠️ 此案件應為線上審核但無附加圖片檔案，請確認申請人是否已完成線上上傳；如確定改採紙本審核，請於右側「審核方式」調整。")
                     else:
                         st.info("📄 本案件已列為**紙本審核**（或為資料復原案件），無需線上附件；請依實際收到的紙本申請表與證明文件核對後，於右側更新審核結果。")
                 else:
+                    if drive_links and len(images) < len(drive_links):
+                        st.caption(f"ℹ️ 雲端硬碟共有 {len(drive_links)} 張原圖，本機目前只保留 {len(images)} 張（可能是之前已篩選過，或篩選結果不正確）。")
+                        if st.button("🔄 重新從雲端硬碟下載全部照片", key=f"restore_drive_again_{curr_case['id']}"):
+                            _restore_all_from_drive()
                     if len(images) > 1:
                         labels = [image_labels[i] if i < len(image_labels) else f"照片 {i+1}" for i in range(len(images))]
                         suggested_idx = curr_case.get("_suggested_form_idx")
