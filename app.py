@@ -30,6 +30,7 @@ from storage_manager import (
     load_stored_cases,
     load_case_images,
     load_records_json,
+    append_case_to_excel,
     load_delete_log,
     mark_all_as_paper_review,
     find_duplicate_cases,
@@ -317,7 +318,14 @@ def retry_failed_drive_uploads(webhook_url: str):
         else:
             r["drive_upload_error"] = result
             fail_ids.append(r["id"])
-        save_case_to_storage(r)
+        # 批次處理時先略過 Excel 重新產生 (每筆都做等於同一份活頁簿被反覆重建好幾十次)，
+        # 迴圈結束後只重建一次。
+        save_case_to_storage(r, skip_excel=True)
+    if success_ids or fail_ids:
+        try:
+            append_case_to_excel(load_records_json())
+        except Exception:
+            pass
     return success_ids, fail_ids
 
 def generate_case_id() -> str:
@@ -1091,6 +1099,23 @@ else:
                         st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失，或為雲端試算表復原案件），但已備份於雲端硬碟，請點下方連結查看原始照片：")
                         for i, link in enumerate(drive_links, 1):
                             st.markdown(f"- [第 {i} 張原始檔案]({link})")
+                        marked_url = curr_case.get("marked_form_drive_url")
+                        if marked_url:
+                            st.success("✅ 偵測到人工標記的申請表照片，可直接精準下載這一張（不用整批下載）：")
+                            if st.button("📥 下載已標記的申請表", key=f"restore_marked_{curr_case['id']}"):
+                                marked_dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                                with st.spinner("正在下載標記的申請表..."):
+                                    ok_dl, dl_result = download_photos_from_drive(marked_dl_webhook, [marked_url])
+                                if ok_dl and dl_result:
+                                    curr_case["images"] = dl_result
+                                    curr_case["image_labels"] = ["獎學金申請表"]
+                                    curr_case.pop("marked_form_drive_url", None)
+                                    st.session_state.records[curr_case_idx] = curr_case
+                                    save_case_to_storage(curr_case)
+                                    st.success("✅ 已下載標記的申請表！")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ 下載失敗：{dl_result}")
                         if st.button("📥 從雲端硬碟下載照片並還原至系統", key=f"restore_drive_{curr_case['id']}"):
                             _restore_all_from_drive()
                     elif curr_case.get("review_mode") == "online":
@@ -1565,7 +1590,13 @@ else:
                             st.info(f"雲端試算表共有 {len(fetch_result)} 筆資料，皆已存在於系統中，沒有需要復原的案件。")
                         else:
                             for restored_case in new_cases:
-                                save_case_to_storage(restored_case)
+                                # 批次復原時先略過 Excel 重新產生，全部存完後只重建一次，
+                                # 避免幾十筆案件在同一次請求裡把整份活頁簿反覆重建幾十次。
+                                save_case_to_storage(restored_case, skip_excel=True)
+                            try:
+                                append_case_to_excel(load_records_json())
+                            except Exception:
+                                pass
                             st.session_state.records = load_stored_cases()
                             try:
                                 st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
@@ -1597,36 +1628,43 @@ else:
                     if not ok_scan:
                         st.error(f"❌ {scan_result}")
                     else:
+                        # 這裡只比對「文字連結」，不下載任何照片本體：批次案件數一多，若在同一次點擊裡
+                        # 逐筆下載照片，單一次請求耗時與記憶體都會被拉得很長，容易讓伺服器被判定沒回應而中斷。
+                        # 真正要看某筆案件的照片，一律留到下方逐筆案件裡個別下載 (只會有 1 次網路請求)。
                         files_by_case = scan_result.get("files_by_case", {})
                         form_by_case = scan_result.get("form_by_case", {})
-                        relinked, form_restored = [], []
+                        relinked, marked = [], []
                         for r in st.session_state.records:
                             case_id = str(r.get("id", ""))
+                            changed = False
                             if not r.get("drive_photo_links") and not r.get("images"):
                                 links = files_by_case.get(case_id)
                                 if links:
                                     r["drive_photo_links"] = links
-                                    save_case_to_storage(r)
                                     relinked.append(case_id)
+                                    changed = True
                             if not r.get("images") and case_id in form_by_case:
-                                with st.spinner(f"正在下載 {case_id} 標記的申請表..."):
-                                    ok_dl, dl_result = download_photos_from_drive(
-                                        webhook_url, [form_by_case[case_id]["url"]]
-                                    )
-                                if ok_dl and dl_result:
-                                    r["images"] = dl_result
-                                    r["image_labels"] = ["獎學金申請表"]
-                                    save_case_to_storage(r)
-                                    form_restored.append(case_id)
+                                r["marked_form_drive_url"] = form_by_case[case_id]["url"]
+                                marked.append(case_id)
+                                changed = True
+                            if changed:
+                                # 批次處理時先略過 Excel 重新產生，迴圈結束後只重建一次，
+                                # 避免案件數一多，同一份活頁簿在同一次請求裡被反覆重建好幾十次。
+                                save_case_to_storage(r, skip_excel=True)
+                        if relinked or marked:
+                            try:
+                                append_case_to_excel(load_records_json())
+                            except Exception:
+                                pass
                         if relinked:
                             st.success(f"✅ 已為 {len(relinked)} 筆案件補回雲端硬碟連結：{', '.join(relinked)}")
-                        if form_restored:
-                            st.success(f"✅ 已依人工標記精準下載申請表：{', '.join(form_restored)}")
-                        if relinked or form_restored:
+                        if marked:
+                            st.success(f"✅ 已偵測到 {len(marked)} 筆案件有人工標記的申請表：{', '.join(marked)}，請至下方逐筆點「📥 下載已標記的申請表」")
+                        if relinked or marked:
                             st.session_state.records = load_stored_cases()
                             st.rerun()
                         else:
-                            st.info("目前沒有需要補連結、或有標記申請表待下載的案件。")
+                            st.info("目前沒有需要補連結、或有標記申請表的案件。")
 
         if can_manage_system():
             st.markdown("---")

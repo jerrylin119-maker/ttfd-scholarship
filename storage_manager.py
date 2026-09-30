@@ -26,11 +26,15 @@ def ensure_directories():
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
 
-def save_case_to_storage(case_dict: Dict[str, Any]) -> Tuple[bool, str]:
+def save_case_to_storage(case_dict: Dict[str, Any], skip_excel: bool = False) -> Tuple[bool, str]:
     """
     1. 將照片儲存至 ./uploads/{case_id}_{index}.jpg
     2. 將紀錄更新/追加至 ./data/records.json
     3. 自動追加 (append) 至 ./data/獎學金總表.xlsx
+
+    skip_excel=True：批次處理多筆案件時使用，先略過 Excel 重新產生 (每次呼叫都會用「全部案件」
+    重建整份活頁簿，在迴圈裡逐筆呼叫的話等於重複做好幾十次一樣的事)，等迴圈結束後由呼叫端
+    自行呼叫一次 append_case_to_excel(load_records_json())，避免批次操作耗時暴增、拖垮伺服器。
     """
     ensure_directories()
     case_id = case_dict.get("id", f"TTFD-{datetime.now().strftime('%Y%m%d%H%M%S')}")
@@ -75,10 +79,11 @@ def save_case_to_storage(case_dict: Dict[str, Any]) -> Tuple[bool, str]:
         json.dump(all_records, f, ensure_ascii=False, indent=2)
         
     # 3. 依「獎學金類別」重新產生 ./data/獎學金總表.xlsx (自動分頁：義消聯合總會獎助學金 / 本局津芳冰城陳慶銳先生獎學金)
-    try:
-        append_case_to_excel(all_records)
-    except Exception as e:
-        print(f"Error appending to Excel: {e}")
+    if not skip_excel:
+        try:
+            append_case_to_excel(all_records)
+        except Exception as e:
+            print(f"Error appending to Excel: {e}")
 
     return True, f"已成功將 {len(saved_paths)} 張照片存入 ./uploads/，並將數據追加至 ./data/獎學金總表.xlsx！"
 
