@@ -240,6 +240,18 @@ def build_new_case(ai_result, images, labels, stype, l1, l2) -> dict:
         "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
+def flash_success(msg: str):
+    """
+    記錄一則「跨 rerun 存活」的成功訊息。st.success() 接著馬上呼叫 st.rerun() 的話，
+    畫面幾乎來不及畫出訊息就被整頁重新整理蓋掉了 (使用者會覺得「怎麼都沒顯示已儲存」，
+    但其實資料已經存了)。改成先存進 session_state，等 rerun 後在頁面最上方統一顯示一次。
+    """
+    st.session_state["_flash"] = ("success", msg)
+
+def flash_error(msg: str):
+    """同 flash_success()，用於失敗訊息。"""
+    st.session_state["_flash"] = ("error", msg)
+
 def select_keep_images(ai_result, images, labels):
     """
     只挑出「獎學金申請表」那一張影像留在系統本機（供左圖右表複核時檢視），其餘附件影像
@@ -534,6 +546,12 @@ def save_persistent_webhook(url: str):
     except Exception:
         pass
 
+# 顯示上一次操作 (儲存/下載/復原等) 留下的訊息，一定要在任何 st.rerun() 之前顯示過一次，
+# 否則畫面上根本看不到 (見 flash_success/flash_error 的說明)
+if "_flash" in st.session_state:
+    _flash_kind, _flash_msg = st.session_state.pop("_flash")
+    (st.success if _flash_kind == "success" else st.error)(_flash_msg)
+
 # 初始化 Session State (優先從 ./data/records.json 載入歷史儲存紀錄)
 if "records" not in st.session_state:
     st.session_state.records = load_stored_cases()
@@ -640,7 +658,7 @@ with st.sidebar:
                     if st.button("💾 儲存並套用新金鑰", use_container_width=True):
                         save_persistent_api_key(api_key_input)
                         st.session_state.api_key = api_key_input
-                        st.success("已更新全域金鑰！")
+                        flash_success("已更新全域金鑰！")
                         st.rerun()
             else:
                 api_key_input = st.text_input(
@@ -656,7 +674,7 @@ with st.sidebar:
                     if api_key_input:
                         save_persistent_api_key(api_key_input)
                         st.session_state.api_key = api_key_input
-                        st.success("已儲存為全域金鑰！全體同仁的手機與電腦均免再輸入。")
+                        flash_success("已儲存為全域金鑰！全體同仁的手機與電腦均免再輸入。")
                         st.rerun()
                     else:
                         st.error("請先輸入有效的 API Key！")
@@ -1079,7 +1097,7 @@ else:
                             curr_case.pop("_suggested_form_idx", None)
                             st.session_state.records[curr_case_idx] = curr_case
                             save_case_to_storage(curr_case)
-                            st.success("✅ 已下載標記的申請表！")
+                            flash_success("✅ 已下載標記的申請表！")
                             st.rerun()
                         else:
                             st.error(f"❌ 下載失敗：{dl_result}")
@@ -1110,7 +1128,7 @@ else:
                             pass
                     st.session_state.records[curr_case_idx] = curr_case
                     save_case_to_storage(curr_case)
-                    st.success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
+                    flash_success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
                     st.rerun()
 
                 if not images:
@@ -1150,7 +1168,7 @@ else:
                             curr_case.pop("_suggested_form_idx", None)
                             st.session_state.records[curr_case_idx] = curr_case
                             save_case_to_storage(curr_case)
-                            st.success("✅ 已保留申請表影像，其餘照片仍完整備份於雲端硬碟。")
+                            flash_success("✅ 已保留申請表影像，其餘照片仍完整備份於雲端硬碟。")
                             st.rerun()
                     else:
                         selected_img_idx = 0
@@ -1191,7 +1209,7 @@ else:
                                     curr_case["ai_failed"] = False
                                     st.session_state.records[curr_case_idx] = curr_case
                                     save_case_to_storage(curr_case)
-                                    st.success("✅ AI 重新分析成功，欄位已自動更新！")
+                                    flash_success("✅ AI 重新分析成功，欄位已自動更新！")
                                     st.rerun()
                                 except Exception as retry_err:
                                     st.error(f"❌ 重新分析仍然失敗：{retry_err}")
@@ -1308,7 +1326,7 @@ else:
 
                         st.session_state.records[curr_case_idx] = curr_case
                         save_case_to_storage(curr_case)
-                        st.success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
+                        flash_success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
                         st.rerun()
 
     # ----------------- 後台 TAB 2: 承辦人代為上傳 -----------------
@@ -1361,7 +1379,7 @@ else:
                     "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 finalize_submission(new_c, drive_images=admin_imgs)
-                st.success(f"✅ 成功加入案件【{new_c['id']}】並存入 ./uploads/ 與總表！")
+                flash_success(f"✅ 成功加入案件【{new_c['id']}】並存入 ./uploads/ 與總表！")
                 st.rerun()
 
     # ----------------- 後台 TAB 3: 總表清冊與匯出 -----------------
@@ -1550,19 +1568,21 @@ else:
                         with st.spinner("正在重新嘗試上傳尚未備份的照片..."):
                             success_ids, fail_ids = retry_failed_drive_uploads(webhook_url)
                         if success_ids:
-                            st.success(f"✅ 已成功補上傳 {len(success_ids)} 筆案件的照片：{', '.join(success_ids)}")
+                            msg = f"✅ 已成功補上傳 {len(success_ids)} 筆案件的照片：{', '.join(success_ids)}"
                             with st.spinner("正在同步最新結果至 Google 試算表..."):
                                 try:
                                     sync_latest_to_google_sheets(webhook_url)
                                 except Exception:
                                     pass
                             st.session_state.records = load_stored_cases()
-                        if fail_ids:
-                            st.error(f"❌ 仍有 {len(fail_ids)} 筆案件上傳失敗，請檢查該案件的錯誤訊息：{', '.join(fail_ids)}")
-                        if not success_ids and not fail_ids:
-                            st.info("目前沒有需要補救的案件（可能本機照片檔案已遺失，須請分隊確認是否補送）。")
-                        if success_ids:
+                            if fail_ids:
+                                msg += f"\n\n❌ 仍有 {len(fail_ids)} 筆案件上傳失敗，請檢查該案件的錯誤訊息：{', '.join(fail_ids)}"
+                            flash_success(msg)
                             st.rerun()
+                        elif fail_ids:
+                            st.error(f"❌ 仍有 {len(fail_ids)} 筆案件上傳失敗，請檢查該案件的錯誤訊息：{', '.join(fail_ids)}")
+                        else:
+                            st.info("目前沒有需要補救的案件（可能本機照片檔案已遺失，須請分隊確認是否補送）。")
 
             with col_g2:
                 with st.expander("📖 1 分鐘建立 Google Sheets 雲端連線教學", expanded=False):
@@ -1613,7 +1633,7 @@ else:
                                 st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
                             except OSError:
                                 pass
-                            st.success(
+                            flash_success(
                                 f"✅ 已從雲端試算表復原 {len(new_cases)} 筆案件（{', '.join(r['id'] for r in new_cases)}）。"
                                 f"原始照片無法復原，請通知相關分隊確認是否需要補送。"
                             )
@@ -1670,11 +1690,13 @@ else:
                                 append_case_to_excel(load_records_json())
                             except Exception:
                                 pass
-                        if relinked:
-                            st.success(f"✅ 已為 {len(relinked)} 筆案件補回雲端硬碟連結：{', '.join(relinked)}")
-                        if marked:
-                            st.success(f"✅ 已偵測到 {len(marked)} 筆案件有人工標記的申請表：{', '.join(marked)}，請至下方逐筆點「📥 下載已標記的申請表」")
                         if relinked or marked:
+                            parts = []
+                            if relinked:
+                                parts.append(f"✅ 已為 {len(relinked)} 筆案件補回雲端硬碟連結：{', '.join(relinked)}")
+                            if marked:
+                                parts.append(f"✅ 已偵測到 {len(marked)} 筆案件有人工標記的申請表：{', '.join(marked)}，請至下方逐筆點「📥 下載已標記的申請表」")
+                            flash_success("\n\n".join(parts))
                             st.session_state.records = load_stored_cases()
                             st.rerun()
                         else:
