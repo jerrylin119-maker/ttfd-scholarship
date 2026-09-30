@@ -1190,7 +1190,10 @@ else:
 
                 if curr_case.get("ai_failed"):
                     st.warning("⚠️ 本案件送出時 AI 智慧審查暫時無法使用，以下欄位尚未自動填入，請人工核對左側原始文件後手動輸入，或點下方按鈕重新讓 AI 分析。")
-                    if images and st.button("🔄 重新以 AI 分析此案件", key=f"retry_ai_{curr_case['id']}"):
+                elif images:
+                    st.caption("💡 可用下方按鈕讓 AI 分析目前的照片，自動帶入姓名、成績等欄位（例如剛從雲端硬碟下載照片、或案件原本是復原資料、從未經過 AI 辨識）。")
+
+                if images and st.button("🔄 重新以 AI 分析此案件", key=f"retry_ai_{curr_case['id']}"):
                         retry_key = st.session_state.api_key or load_persistent_api_key()
                         if not retry_key:
                             st.error("❌ 系統尚未設定 API Key，請先於側邊欄設定！")
