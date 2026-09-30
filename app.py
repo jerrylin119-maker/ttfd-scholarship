@@ -1051,22 +1051,37 @@ else:
                         st.info("📷 本機沒有照片檔案（可能因伺服器重啟遺失，或為雲端試算表復原案件），但已備份於雲端硬碟，請點下方連結查看原始照片：")
                         for i, link in enumerate(drive_links, 1):
                             st.markdown(f"- [第 {i} 張原始檔案]({link})")
-                        if st.button("📥 從雲端硬碟下載照片並還原至系統", key=f"restore_drive_{curr_case['id']}"):
+                        if st.button("📥 從雲端硬碟辨識並還原申請表", key=f"restore_drive_{curr_case['id']}"):
                             dl_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                             if not dl_webhook:
                                 st.error("❌ 系統尚未設定 Google 試算表 Webhook 網址！")
                             else:
                                 with st.spinner("正在從雲端硬碟下載原始照片..."):
                                     ok_dl, dl_result = download_photos_from_drive(dl_webhook, drive_links)
-                                if ok_dl:
-                                    curr_case["images"] = dl_result
-                                    curr_case["image_labels"] = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
+                                if not ok_dl:
+                                    st.error(f"❌ 下載失敗：{dl_result}")
+                                else:
+                                    fallback_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
+                                    kept_images, kept_labels = dl_result, fallback_labels
+                                    id_key = st.session_state.get("api_key") or load_persistent_api_key()
+                                    # 只在畫面上保留申請表那一張 (其餘附件仍完整存在雲端硬碟)，
+                                    # 避免把整批還原的照片都塞回系統記憶體，重蹈今天當機的覆轍。
+                                    if id_key and len(dl_result) > 1:
+                                        try:
+                                            with st.spinner(f"正在用 AI 從 {len(dl_result)} 張照片中辨識申請表..."):
+                                                id_result = analyze_scholarship_documents(dl_result, id_key, "gemini-3.6-flash")
+                                            kept_images, kept_labels = select_keep_images(id_result, dl_result, fallback_labels)
+                                        except Exception as e:
+                                            st.caption(f"⚠️ AI 辨識申請表失敗（{e}），已保留全部 {len(dl_result)} 張照片。")
+                                    curr_case["images"] = kept_images
+                                    curr_case["image_labels"] = kept_labels
                                     st.session_state.records[curr_case_idx] = curr_case
                                     save_case_to_storage(curr_case)
-                                    st.success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！")
+                                    if len(kept_images) < len(dl_result):
+                                        st.success(f"✅ 已從雲端硬碟還原，AI 從 {len(dl_result)} 張照片中挑出申請表顯示，其餘仍完整備份於雲端硬碟。")
+                                    else:
+                                        st.success(f"✅ 已從雲端硬碟還原 {len(kept_images)} 張照片！")
                                     st.rerun()
-                                else:
-                                    st.error(f"❌ 下載失敗：{dl_result}")
                     elif curr_case.get("review_mode") == "online":
                         st.warning("⚠️ 此案件應為線上審核但無附加圖片檔案，請確認申請人是否已完成線上上傳；如確定改採紙本審核，請於右側「審核方式」調整。")
                     else:
