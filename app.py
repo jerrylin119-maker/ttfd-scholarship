@@ -28,6 +28,7 @@ importlib.reload(storage_manager)
 from storage_manager import (
     save_case_to_storage,
     load_stored_cases,
+    load_case_images,
     load_records_json,
     load_delete_log,
     mark_all_as_paper_review,
@@ -303,9 +304,12 @@ def retry_failed_drive_uploads(webhook_url: str):
     records = load_stored_cases()
     success_ids, fail_ids = [], []
     for r in records:
-        if r.get("review_mode") != "online" or r.get("drive_photo_links") or not r.get("images"):
+        if r.get("review_mode") != "online" or r.get("drive_photo_links") or not r.get("image_paths"):
             continue
-        ok, result = upload_photos_to_drive(webhook_url, r["id"], r.get("unit_level1", ""), r["images"])
+        images = load_case_images(r)
+        if not images:
+            continue
+        ok, result = upload_photos_to_drive(webhook_url, r["id"], r.get("unit_level1", ""), images)
         if ok:
             r["drive_photo_links"] = result
             r.pop("drive_upload_error", None)
@@ -1044,7 +1048,13 @@ else:
                 st.markdown(f'<div class="section-title">🖼️ 原始申請資料與成績單檢視 &nbsp; <span class="unit-tag">{curr_case.get("scholarship_type", "未分類")}</span> &nbsp; <span class="unit-tag">{curr_case.get("unit_level1", "")} / {curr_case.get("unit_level2", "")}</span></div>', unsafe_allow_html=True)
                 images = curr_case.get("images", [])
                 image_labels = curr_case.get("image_labels", [])
-                
+                # 案件列表載入時不會預先帶照片 (見 load_stored_cases)，只有「目前正在看」的這一筆
+                # 才在這裡現場從 ./uploads/ 載入，避免每個瀏覽者一開啟系統就把所有人的照片都讀進記憶體。
+                if not images and curr_case.get("image_paths"):
+                    images = load_case_images(curr_case)
+                    if len(image_labels) != len(images):
+                        image_labels = [f"照片 {i+1}" for i in range(len(images))]
+
                 drive_links = curr_case.get("drive_photo_links") or []
 
                 def _restore_all_from_drive():
@@ -1135,7 +1145,7 @@ else:
 
                 if curr_case.get("ai_failed"):
                     st.warning("⚠️ 本案件送出時 AI 智慧審查暫時無法使用，以下欄位尚未自動填入，請人工核對左側原始文件後手動輸入，或點下方按鈕重新讓 AI 分析。")
-                    if curr_case.get("images") and st.button("🔄 重新以 AI 分析此案件", key=f"retry_ai_{curr_case['id']}"):
+                    if images and st.button("🔄 重新以 AI 分析此案件", key=f"retry_ai_{curr_case['id']}"):
                         retry_key = st.session_state.api_key or load_persistent_api_key()
                         if not retry_key:
                             st.error("❌ 系統尚未設定 API Key，請先於側邊欄設定！")
@@ -1143,7 +1153,7 @@ else:
                             with st.spinner("正在重新進行 AI 智慧多模態辨識..."):
                                 try:
                                     retry_result = analyze_scholarship_documents(
-                                        images=curr_case["images"], api_key=retry_key, model_name="gemini-3.6-flash"
+                                        images=images, api_key=retry_key, model_name="gemini-3.6-flash"
                                     )
                                     for k in ("applicant_name", "applicant_id", "child_name", "category",
                                               "semester_gpa", "conduct", "attachments", "review_status",

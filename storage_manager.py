@@ -92,34 +92,43 @@ def append_case_to_excel(all_records: List[Dict[str, Any]]):
         f.write(excel_bytes.getvalue())
 
 def load_stored_cases() -> List[Dict[str, Any]]:
-    """從 ./data/records.json 與 ./uploads/ 載入所有歷史儲存案件"""
+    """
+    從 ./data/records.json 載入所有歷史儲存案件的文字資料。
+    【效能】不會預先把每一筆案件的照片都讀進記憶體——每個瀏覽者一開啟系統，若把全部人的全部照片
+    都一次載入，案件與照片數量增加後很容易把伺服器記憶體撐爆而當機。改成「哪一筆案件真的要顯示，
+    才用 load_case_images() 現場載入那一筆」，見 app.py 的呼叫方式。
+    """
     ensure_directories()
     if not os.path.exists(JSON_FILE):
         return []
-        
+
     try:
         with open(JSON_FILE, "r", encoding="utf-8") as f:
             records = json.load(f)
-            
+
         for r in records:
-            images = []
-            image_labels = []
-            for path_fn in r.get("image_paths", []):
-                full_p = os.path.join(UPLOADS_DIR, path_fn)
-                if os.path.exists(full_p):
-                    try:
-                        img = Image.open(full_p)
-                        images.append(img)
-                        image_labels.append(path_fn)
-                    except Exception:
-                        pass
-            r["images"] = images
-            r["image_labels"] = image_labels
-            
+            r.setdefault("images", [])
+            r.setdefault("image_labels", [])
+
         return records
     except Exception as e:
         print(f"Error loading stored cases: {e}")
         return []
+
+def load_case_images(case: Dict[str, Any]) -> List[Any]:
+    """依單一案件的 image_paths，從 ./uploads/ 現場載入該筆案件的照片 (PIL Image 清單)。
+    只在畫面真的要顯示/使用某一筆案件的照片時才呼叫，不要在迴圈裡對整批案件呼叫。"""
+    images = []
+    for path_fn in case.get("image_paths", []):
+        full_p = os.path.join(UPLOADS_DIR, path_fn)
+        if os.path.exists(full_p):
+            try:
+                img = Image.open(full_p)
+                img.load()
+                images.append(img)
+            except Exception:
+                pass
+    return images
 
 def package_uploads_zip(only_files=None) -> io.BytesIO:
     """將 ./uploads/ 目錄打包為 zip 檔案供承辦人下載；only_files 有指定時，只打包這些檔名 (用於各大隊只下載自己的照片)"""
