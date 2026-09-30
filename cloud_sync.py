@@ -246,17 +246,48 @@ function uploadPhotos_(data) {
 }
 
 // 依雲端硬碟檔案 ID 清單，把原始照片下載回來 (用於本機資料遺失後，把雲端硬碟裡的照片還原回系統)
+// 【效能】改用 UrlFetchApp.fetchAll 平行下載，而不是用 DriveApp 一個一個檔案排隊抓：
+// 逐一呼叫 DriveApp.getFileById().getBlob() 每個檔案大約要 3-4 秒的網路延遲，7 張照片就要
+// 快 30 秒，容易讓 Streamlit 那端等到逾時、被平台判定沒回應而重啟。平行送出後全部檔案
+// 加起來的時間跟抓「一張」差不多，不會隨檔案數量線性累加。
 function downloadPhotos_(data) {
   var ids = data.file_ids || [];
   var files = [];
+  if (ids.length === 0) {
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", files: files}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  var token = ScriptApp.getOAuthToken();
+  var contentReqs = ids.map(function (id) {
+    return {
+      url: "https://www.googleapis.com/drive/v3/files/" + id + "?alt=media",
+      headers: {Authorization: "Bearer " + token},
+      muteHttpExceptions: true
+    };
+  });
+  var metaReqs = ids.map(function (id) {
+    return {
+      url: "https://www.googleapis.com/drive/v3/files/" + id + "?fields=name,mimeType",
+      headers: {Authorization: "Bearer " + token},
+      muteHttpExceptions: true
+    };
+  });
+  var contentResps = UrlFetchApp.fetchAll(contentReqs);
+  var metaResps = UrlFetchApp.fetchAll(metaReqs);
   for (var i = 0; i < ids.length; i++) {
     try {
-      var file = DriveApp.getFileById(ids[i]);
-      var blob = file.getBlob();
+      var code = contentResps[i].getResponseCode();
+      if (code !== 200) {
+        files.push({file_id: ids[i], error: "下載失敗，HTTP " + code});
+        continue;
+      }
+      var meta = {};
+      try { meta = JSON.parse(metaResps[i].getContentText()); } catch (e) {}
+      var blob = contentResps[i].getBlob();
       files.push({
         file_id: ids[i],
-        filename: file.getName(),
-        mimeType: blob.getContentType(),
+        filename: meta.name || (ids[i] + ".jpg"),
+        mimeType: meta.mimeType || blob.getContentType() || "image/jpeg",
         data: Utilities.base64Encode(blob.getBytes())
       });
     } catch (err) {
