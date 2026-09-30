@@ -160,17 +160,15 @@ def analyze_scholarship_documents(
     # 嘗試的模型清單（優先使用指定模型，若 404 則自動依序嘗試其他可用模型）
     # 「-latest」是 Google 官方提供的自動導向別名，會一直指向目前建議使用的模型，
     # 排在清單最前面可以降低未來舊版模型被 Google 淘汰後又整批 404 的機率。
+    # 2.5-flash / 2.5-pro / 2.0-flash / 1.5-flash 已實測對本專案金鑰永久回傳
+    # 404「不再開放給新用戶使用」，3.6-pro 則對 generateContent 回傳 404，
+    # 這 5 個都不會因為額度恢復而變成可用，故不再放入清單浪費嘗試次數。
     candidate_models = [model_name]
     fallback_pool = [
         "gemini-flash-latest",
         "gemini-pro-latest",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
-        "gemini-3.6-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
     ]
     for m in fallback_pool:
         if m not in candidate_models:
