@@ -1369,8 +1369,17 @@ else:
         if not my_records:
             st.info("尚無審核紀錄。")
         else:
+            def _case_sort_key(r):
+                # 依案號 (如 115-42) 的年度與序號數值排序，而不是資料載入的原始順序——
+                # 否則像「從雲端試算表復原資料」是逐分頁 (逐獎學金類別) 處理，會讓總表看起來
+                # 一下子案號很大、一下子案號又很小 (先列完一種類別，才接著列下一種類別)。
+                m = re.match(r"^(\d+)-(\d+)$", str(r.get("id", "")))
+                if m:
+                    return (0, int(m.group(1)), int(m.group(2)))
+                return (1, 0, str(r.get("id", "")))
+
             table_rows = []
-            for idx, r in enumerate(my_records, 1):
+            for idx, r in enumerate(sorted(my_records, key=_case_sort_key), 1):
                 att = r.get("attachments", {})
                 att_keys = [
                     ("application_form", "申請表"),
