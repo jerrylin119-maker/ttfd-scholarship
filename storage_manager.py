@@ -53,9 +53,14 @@ def save_case_to_storage(case_dict: Dict[str, Any], skip_excel: bool = False) ->
                 saved_paths.append(filename)
         except Exception as e:
             print(f"Error saving image {filename}: {e}")
-            
-    case_dict["image_paths"] = saved_paths
-    
+
+    # 只有在「這次呼叫真的有帶新照片」時才覆寫 image_paths；
+    # 若 images 是空的 (例如案件列表是用 load_stored_cases() 懶載入的，本來就不會預先帶照片，
+    # 只有真正要顯示時才用 load_case_images() 現場讀)，保留 case_dict 裡原本已有的 image_paths，
+    # 避免像「儲存審核結果」這種沒有動到照片的存檔動作，把先前已經存好的照片記錄誤清空。
+    if images:
+        case_dict["image_paths"] = saved_paths
+
     # 2. 讀取並追加至 records.json
     all_records = []
     if os.path.exists(JSON_FILE):
