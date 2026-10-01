@@ -1016,9 +1016,10 @@ else:
     eligible_count = sum(1 for r in records if r.get("review_status") == "符合資格")
     pending_count = sum(1 for r in records if r.get("review_status") == "待補件")
     ineligible_count = sum(1 for r in records if r.get("review_status") == "不符資格")
+    confirmed_count = sum(1 for r in records if r.get("review_confirmed"))
     pass_rate = f"{(eligible_count / total_count * 100):.1f}%" if total_count > 0 else "0.0%"
 
-    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5 = st.columns(5)
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5, col_kpi6 = st.columns(6)
     with col_kpi1:
         st.markdown(f'<div class="stat-card"><div class="stat-label">總申請件數</div><div class="stat-val" style="color:#1e3c72;">{total_count} <span style="font-size:14px;font-weight:normal;">件</span></div></div>', unsafe_allow_html=True)
     with col_kpi2:
@@ -1029,6 +1030,8 @@ else:
         st.markdown(f'<div class="stat-card"><div class="stat-label">不符資格</div><div class="stat-val" style="color:#dc2626;">{ineligible_count} <span style="font-size:14px;font-weight:normal;">人</span></div></div>', unsafe_allow_html=True)
     with col_kpi5:
         st.markdown(f'<div class="stat-card"><div class="stat-label">核定通過率</div><div class="stat-val" style="color:#2563eb;">{pass_rate}</div></div>', unsafe_allow_html=True)
+    with col_kpi6:
+        st.markdown(f'<div class="stat-card"><div class="stat-label">審核完畢</div><div class="stat-val" style="color:#0d9488;">{confirmed_count} <span style="font-size:14px;font-weight:normal;">件</span></div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1046,6 +1049,7 @@ else:
             case_options = {
                 r["id"]: (
                     ("⚠️AI待複核 " if r.get("ai_failed") else "")
+                    + ("✅已確認 " if r.get("review_confirmed") else "")
                     + f"【{r.get('id')}】[{r.get('scholarship_type', '未分類')}] [{r.get('unit_level1', '未定')} / {r.get('unit_level2', '未定')}] {r.get('applicant_name', '未命名')} / 子女: {r.get('child_name', '未命名')} ({r.get('category', '未定')}) - {r.get('review_status', '待審')}"
                 )
                 for r in my_records
@@ -1332,6 +1336,30 @@ else:
                         flash_success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
                         st.rerun()
 
+                st.markdown("---")
+                if curr_case.get("review_confirmed"):
+                    st.success(
+                        f"✅ 此案件已由 **{curr_case.get('review_confirmed_by', '—')}** 於 "
+                        f"{curr_case.get('review_confirmed_at', '—')} 確認審核完畢。"
+                    )
+                    if st.button("↩️ 取消確認（重新開放複核）", key=f"unconfirm_{curr_case['id']}"):
+                        curr_case["review_confirmed"] = False
+                        curr_case.pop("review_confirmed_by", None)
+                        curr_case.pop("review_confirmed_at", None)
+                        st.session_state.records[curr_case_idx] = curr_case
+                        save_case_to_storage(curr_case)
+                        flash_success(f"已取消【{curr_case['id']}】的審核完畢標記。")
+                        st.rerun()
+                else:
+                    if st.button("✅ 確認審核完畢（申請表及附件已核對無誤）", key=f"confirm_review_{curr_case['id']}", type="primary", use_container_width=True):
+                        curr_case["review_confirmed"] = True
+                        curr_case["review_confirmed_by"] = actor_label()
+                        curr_case["review_confirmed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.session_state.records[curr_case_idx] = curr_case
+                        save_case_to_storage(curr_case)
+                        flash_success(f"✅ 已將【{curr_case['id']}】標記為審核完畢！")
+                        st.rerun()
+
     # ----------------- 後台 TAB 2: 承辦人代為上傳 -----------------
     with tab2:
         st.markdown('<div class="section-title">📤 承辦人代為上傳申請文件與 AI 解析</div>', unsafe_allow_html=True)
@@ -1433,6 +1461,7 @@ else:
                     "操行": r.get("conduct", ""),
                     "附件檢核": att_desc,
                     "審核結果": r.get("review_status", ""),
+                    "審核完畢": f"✅ {r.get('review_confirmed_by', '')}" if r.get("review_confirmed") else "",
                     "判定理由 / 備註": r.get("review_reason", r.get("notes", ""))
                 })
                 
