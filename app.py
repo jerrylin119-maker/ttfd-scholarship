@@ -16,15 +16,10 @@ import pandas as pd
 from PIL import Image
 import pypdfium2 as pdfium
 import qrcode
-import importlib
 
 # 匯入自訂模組
-import excel_exporter
-importlib.reload(excel_exporter)
 from excel_exporter import export_scholarship_excel
 
-import storage_manager
-importlib.reload(storage_manager)
 from storage_manager import (
     save_case_to_storage,
     load_stored_cases,
@@ -51,8 +46,6 @@ from gemini_analyzer import (
     list_available_gemini_models,
     ATTACHMENT_NAMES
 )
-import cloud_sync
-importlib.reload(cloud_sync)
 from cloud_sync import (
     sync_to_google_sheets,
     test_webhook_connection,
