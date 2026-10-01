@@ -307,7 +307,9 @@ def resync_from_sheets_overwrite(webhook_url: str):
     """
     從雲端試算表把『所有』案件的文字欄位抓回來——本機已存在的案件編號也會用試算表內容覆蓋更新，
     不是只新增試算表裡「本機沒有」的案件（那是「🛟 立即從雲端試算表復原資料」在做的事）。
-    只用於「快照還原」這類『已知試算表內容才是正確版本』的情境，照片 (images/image_paths) 完全不受影響。
+    只用於「快照還原」這類『已知試算表內容才是正確版本』的情境，本機已有的照片檔案
+    (images/image_paths) 完全不受影響——但雲端硬碟連結 (drive_photo_links) 會一併更新，
+    這樣案件畫面才看得到「📥 從雲端硬碟下載照片」的按鈕，不會因為連結記錄遺失而找不到照片。
     成功時回傳 (True, (新增筆數, 更新筆數))；失敗時回傳 (False, 錯誤訊息)。
     """
     ok_fetch, fetch_result = fetch_cases_from_google_sheets(webhook_url)
@@ -329,6 +331,9 @@ def resync_from_sheets_overwrite(webhook_url: str):
             for k in text_fields:
                 if k in r:
                     merged[k] = r[k]
+            # 只有快照裡「真的有」連結時才覆蓋，避免反而把本機既有的正確連結洗成空值
+            if r.get("drive_photo_links"):
+                merged["drive_photo_links"] = r["drive_photo_links"]
             save_case_to_storage(merged, skip_excel=True)
             updated += 1
         else:
