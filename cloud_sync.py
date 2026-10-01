@@ -31,6 +31,9 @@ function doGet(e) {
   if (action === "list_photos") {
     return listAllPhotos_();
   }
+  if (action === "list_backups") {
+    return listBackupSnapshots_();
+  }
   return ContentService.createTextOutput(JSON.stringify({
     status: "ok",
     message: "🚒 臺東縣消防局 獎學金同步 Webhook 連線正常！"
@@ -188,6 +191,9 @@ function doPost(e) {
     if (data.action === "download_photos") {
       return downloadPhotos_(data);
     }
+    if (data.action === "restore_backup") {
+      return restoreFromSnapshot_(data);
+    }
     return syncAll_(data);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
@@ -327,6 +333,126 @@ function listAllPhotos_() {
       }
     }
     return ContentService.createTextOutput(JSON.stringify({status: "ok", files_by_case: byCase, form_by_case: formByCase}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// ========== 每日自動快照備份 ==========
+// 把整份試算表複製一份、存進雲端硬碟裡獨立的「試算表每日快照備份」資料夾，檔名帶當天日期。
+// 一天只會備份一次 (同一天重複執行會跳過)，用於資料萬一損毀時的時間點還原。
+
+function getBackupFolder_() {
+  var photoFolder = DriveApp.getFolderById(PHOTO_ROOT_FOLDER_ID);
+  var parents = photoFolder.getParents();
+  var root = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  return getOrCreateSubfolder_(root, "試算表每日快照備份");
+}
+
+// 每日定時執行的備份動作本體；要讓它「每天自動」執行，請執行一次 installDailyBackupTrigger()。
+function dailyBackupSnapshot() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var file = DriveApp.getFileById(ss.getId());
+  var folder = getBackupFolder_();
+  var today = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyyMMdd");
+  var name = "獎學金試算表快照_" + today;
+  if (folder.getFilesByName(name).hasNext()) return; // 同一天已經備份過，不重複建立
+  file.makeCopy(name, folder);
+}
+
+// 安裝「每天自動執行 dailyBackupSnapshot」的定時觸發器：只需要手動執行這個函式「一次」
+// (在 Apps Script 編輯器選這個函式、按執行)，之後就會每天凌晨 2 點自動備份，不需要再手動操作。
+// 重複執行也沒關係，會先清掉舊的同名觸發器再重新建立一個，不會裝到好幾份。
+function installDailyBackupTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "dailyBackupSnapshot") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  ScriptApp.newTrigger("dailyBackupSnapshot")
+    .timeBased()
+    .atHour(2)
+    .everyDays(1)
+    .inTimezone("Asia/Taipei")
+    .create();
+}
+
+// 列出目前雲端硬碟裡有哪些每日快照 (給系統「📅 從每日快照還原」功能選擇要還原哪一天用)
+function listBackupSnapshots_() {
+  try {
+    var folder = getBackupFolder_();
+    var files = folder.getFiles();
+    var list = [];
+    while (files.hasNext()) {
+      var f = files.next();
+      list.push({id: f.getId(), name: f.getName(), created: f.getDateCreated().toISOString()});
+    }
+    list.sort(function (a, b) { return b.created < a.created ? -1 : (b.created > a.created ? 1 : 0); });
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", backups: list}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// 把指定的某一份快照「比對案件編號合併」回正式試算表 (沿用 upsertRows_ 的安全機制，
+// 不會整個清空重寫，快照裡沒有、但正式表上現有的案件不受影響)。
+// 只處理目前系統格式的分頁 (含「獎學金類別」欄)，略過快照裡可能殘留的舊格式分頁。
+function restoreFromSnapshot_(data) {
+  try {
+    var snapId = data.backup_id;
+    if (!snapId) {
+      return ContentService.createTextOutput(JSON.stringify({status: "error", error: "缺少 backup_id"}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    var snapSs = SpreadsheetApp.openById(snapId);
+    var liveSs = SpreadsheetApp.getActiveSpreadsheet();
+    var snapSheets = snapSs.getSheets();
+    var restored = [];
+    for (var i = 0; i < snapSheets.length; i++) {
+      var snapSheet = snapSheets[i];
+      var values = snapSheet.getDataRange().getValues();
+      if (values.length < 2) continue;
+      var headers = values[0];
+      if (headers.indexOf("獎學金類別") === -1) continue;
+      var idIdx = headers.indexOf("案件編號");
+      var rows = [];
+      for (var r = 1; r < values.length; r++) {
+        var row = values[r];
+        var id = String(row[idIdx] || "").trim();
+        if (!id) continue;
+        var rec = {};
+        for (var c = 0; c < headers.length; c++) {
+          rec[headers[c]] = row[c];
+        }
+        rows.push({
+          id: id,
+          scholarship_type: rec["獎學金類別"] || "未分類",
+          unit_level1: rec["大隊/局本部"] || "",
+          unit_level2: rec["分隊/科室"] || "",
+          applicant_name: rec["申請人姓名"] || "",
+          applicant_id: rec["身分證字號"] || "",
+          child_name: rec["子女姓名"] || "",
+          category: rec["申請組別"] || "",
+          semester_gpa: rec["學期總平均"],
+          conduct: rec["操行成績"] || "",
+          attachment_desc: rec["附件檢核(5項)"] || "",
+          review_status: rec["審核結果"] || "",
+          review_reason: rec["判定理由說明"] || "",
+          drive_links: rec["雲端硬碟連結"] || ""
+        });
+      }
+      if (rows.length > 0) {
+        var liveSheet = getOrCreateSheet_(liveSs, snapSheet.getName());
+        upsertRows_(liveSheet, rows);
+        restored.push(snapSheet.getName() + "(" + rows.length + "筆)");
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({status: "ok", restored: restored}))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({status: "error", error: err.toString()}))
@@ -626,6 +752,61 @@ def list_drive_photos_by_case(webhook_url: str) -> Tuple[bool, Any]:
         "files_by_case": data.get("files_by_case", {}),
         "form_by_case": data.get("form_by_case", {}),
     }
+
+
+def list_backup_snapshots(webhook_url: str) -> Tuple[bool, Any]:
+    """
+    列出雲端硬碟裡目前有哪些每日自動快照備份 (依建立時間新到舊排序)。
+    成功時回傳 (True, [{"id":, "name":, "created":}, ...])；失敗時回傳 (False, 錯誤訊息)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    try:
+        resp = requests.get(clean_url, params={"action": "list_backups"}, timeout=60, allow_redirects=True)
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code != 200:
+        return False, f"讀取失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"讀取失敗：{data.get('error', '未知錯誤')}"
+    return True, data.get("backups", [])
+
+
+def restore_from_snapshot(webhook_url: str, backup_id: str) -> Tuple[bool, Any]:
+    """
+    把指定的每日快照「比對案件編號合併」回正式 Google 試算表 (不會清空重寫，快照裡沒有、
+    但試算表現有的案件不受影響)。成功時回傳 (True, 還原摘要清單)；失敗時回傳 (False, 錯誤訊息)。
+    """
+    clean_url = webhook_url.strip() if webhook_url else ""
+    if not clean_url or not clean_url.startswith("http"):
+        return False, "未設定有效的 Google 試算表 Webhook 網址"
+    if not backup_id:
+        return False, "未指定要還原的快照"
+    payload = {"action": "restore_backup", "backup_id": backup_id}
+    try:
+        resp = requests.post(
+            clean_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=120,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        return False, f"連線至 Google 試算表時發生錯誤: {e}"
+    if resp.status_code not in (200, 302):
+        return False, f"還原失敗，伺服器回應代碼：{resp.status_code}"
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "回應格式無法解析，請確認 Apps Script 已更新為最新版本並重新部署"
+    if data.get("status") != "ok":
+        return False, f"還原失敗：{data.get('error', '未知錯誤')}"
+    return True, data.get("restored", [])
 
 
 def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:

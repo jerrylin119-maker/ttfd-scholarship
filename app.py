@@ -53,6 +53,8 @@ from cloud_sync import (
     upload_photos_to_drive,
     download_photos_from_drive,
     list_drive_photos_by_case,
+    list_backup_snapshots,
+    restore_from_snapshot,
     delete_from_google_sheets,
     GOOGLE_APPS_SCRIPT_TEMPLATE,
 )
@@ -300,6 +302,43 @@ def sync_latest_to_google_sheets(webhook_url: str):
     if not latest:
         return False, "目前系統內沒有任何案件資料，為避免清空雲端試算表，已略過同步"
     return sync_to_google_sheets(webhook_url, latest)
+
+def resync_from_sheets_overwrite(webhook_url: str):
+    """
+    從雲端試算表把『所有』案件的文字欄位抓回來——本機已存在的案件編號也會用試算表內容覆蓋更新，
+    不是只新增試算表裡「本機沒有」的案件（那是「🛟 立即從雲端試算表復原資料」在做的事）。
+    只用於「快照還原」這類『已知試算表內容才是正確版本』的情境，照片 (images/image_paths) 完全不受影響。
+    成功時回傳 (True, (新增筆數, 更新筆數))；失敗時回傳 (False, 錯誤訊息)。
+    """
+    ok_fetch, fetch_result = fetch_cases_from_google_sheets(webhook_url)
+    if not ok_fetch:
+        return False, fetch_result
+    existing = {str(r.get("id", "")): r for r in load_records_json()}
+    text_fields = (
+        "scholarship_type", "unit_level1", "unit_level2", "applicant_name", "applicant_id",
+        "child_name", "category", "semester_gpa", "conduct", "attachments", "review_status",
+        "review_reason", "is_eligible"
+    )
+    added, updated = 0, 0
+    for r in fetch_result:
+        rid = str(r.get("id", ""))
+        if not rid:
+            continue
+        if rid in existing:
+            merged = dict(existing[rid])
+            for k in text_fields:
+                if k in r:
+                    merged[k] = r[k]
+            save_case_to_storage(merged, skip_excel=True)
+            updated += 1
+        else:
+            save_case_to_storage(r, skip_excel=True)
+            added += 1
+    try:
+        append_case_to_excel(load_records_json())
+    except Exception:
+        pass
+    return True, (added, updated)
 
 def retry_failed_drive_uploads(webhook_url: str):
     """
@@ -1662,6 +1701,61 @@ else:
                                 f"✅ 已從雲端試算表復原 {len(new_cases)} 筆案件（{', '.join(r['id'] for r in new_cases)}）。"
                                 f"原始照片無法復原，請通知相關分隊確認是否需要補送。"
                             )
+                            st.rerun()
+
+            st.markdown("---")
+            st.markdown('<div class="section-title">📅 從每日快照還原（災難復原用）</div>', unsafe_allow_html=True)
+            st.caption(
+                "Google 試算表每天凌晨會自動產生一份完整快照備份（需先執行一次 Apps Script 裡的 "
+                "installDailyBackupTrigger 安裝定時器）。若發現試算表本身的資料壞掉或被誤改，"
+                "可以在這裡選一份快照、一鍵還原：會先把快照內容比對合併回正式試算表（不會清空重寫），"
+                "接著自動把試算表最新內容同步回本機系統。"
+            )
+            if st.button("🔍 查看可用快照", key="list_backups_btn"):
+                if not webhook_url:
+                    st.error("請先在上方輸入 Google 試算表 Webhook 網址！")
+                else:
+                    with st.spinner("正在查詢雲端硬碟裡的快照清單..."):
+                        ok_list, backups = list_backup_snapshots(webhook_url)
+                    if not ok_list:
+                        st.error(f"❌ {backups}")
+                    elif not backups:
+                        st.info("目前還沒有任何快照，請先到 Apps Script 執行一次 installDailyBackupTrigger 安裝每日自動備份。")
+                    else:
+                        st.session_state["available_backups"] = backups
+
+            backups = st.session_state.get("available_backups") or []
+            if backups:
+                backup_options = {b["id"]: f"{b['name']}（建立於 {b['created'][:19].replace('T', ' ')}）" for b in backups}
+                selected_backup_id = st.selectbox(
+                    "選擇要還原的快照：",
+                    options=list(backup_options.keys()),
+                    format_func=lambda x: backup_options[x],
+                    key="selected_backup_id",
+                )
+                st.warning(
+                    "⚠️ 還原會用快照內容覆蓋本機「已存在」案件的文字欄位（姓名、成績、審核結果等），"
+                    "照片不受影響；快照裡沒有、但目前系統上已有的案件不會被刪除或影響。"
+                )
+                st.checkbox("我了解並確認要還原此快照", key="confirm_restore_backup")
+                if st.button("♻️ 還原此快照", type="primary", use_container_width=True, disabled=not st.session_state.get("confirm_restore_backup")):
+                    with st.spinner("正在把快照內容合併回 Google 試算表..."):
+                        ok_r, restore_info = restore_from_snapshot(webhook_url, selected_backup_id)
+                    if not ok_r:
+                        st.error(f"❌ 還原失敗：{restore_info}")
+                    else:
+                        with st.spinner("正在把試算表最新內容同步回本機系統..."):
+                            ok_sync, sync_info = resync_from_sheets_overwrite(webhook_url)
+                        if not ok_sync:
+                            st.error(f"❌ 試算表已還原，但同步回本機時發生錯誤：{sync_info}")
+                        else:
+                            added, updated = sync_info
+                            flash_success(
+                                f"✅ 已還原快照並同步回系統！試算表分頁：{', '.join(restore_info)}；"
+                                f"本機新增 {added} 筆、更新 {updated} 筆。"
+                            )
+                            st.session_state.records = load_stored_cases()
+                            st.session_state["confirm_restore_backup"] = False
                             st.rerun()
 
             st.markdown("---")
