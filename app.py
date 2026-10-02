@@ -731,7 +731,10 @@ with st.sidebar:
 
         st.markdown("---")
         st.subheader("⚡ 資料管理")
-        st.caption("🗑️ 如有重複或誤送的案件，請至「📊 全局審核總表清冊」分頁最下方的「刪除指定案件」，只會刪除您勾選的案件，其餘案件不受影響。")
+        st.caption(
+            f"🗑️ 如有重複或誤送的案件，請至「📊 {'大隊審核總表清冊' if current_scope() else '全局審核總表清冊'}」"
+            "分頁最下方的「刪除指定案件」，只會刪除您勾選的案件，其餘案件不受影響。"
+        )
 
     st.markdown("---")
     st.subheader("📌 審查標準門檻")
@@ -1041,6 +1044,16 @@ else:
     my_records = visible(st.session_state.records)   # 各大隊帳號只看得到自己大隊的案件
     records = my_records
 
+    if current_scope():
+        with st.expander("📋 大隊審核作業程序提醒（點此展開/收合）", expanded=False):
+            st.markdown(
+                """
+1. 確認分隊繳交紙本資料及編號，於「**大隊審核總表清冊**」區刪除重複案件。
+2. 於「**左圖右表**」案件複核工作台審核申請表資料及附件是否齊全，審核通過按下「**✅ 確認複審完畢**」按鍵。
+3. 所有送審案件審核完畢後，至「**大隊審核總表清冊**」區下載總表，核章後連同紙本一起送業務科彙整複核。
+                """
+            )
+
     ai_failed_cases = [r for r in my_records if r.get("ai_failed")]
     if ai_failed_cases:
         ai_failed_ids = "、".join(r.get("id", "") for r in ai_failed_cases)
@@ -1072,10 +1085,14 @@ else:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # 業務科看得到全部大隊，才是真正的「全局」；各大隊帳號看到的只有自己大隊的案件，
+    # 標示「大隊審核總表清冊」比較不會讓大隊同仁誤會還能看到別的大隊。
+    table_scope_label = "大隊審核總表清冊" if current_scope() else "全局審核總表清冊"
+
     tab1, tab2, tab3 = st.tabs([
         "🔍 「左圖右表」案件複核工作台",
         "📤 承辦人代為上傳新案件",
-        "📊 全局審核總表清冊與 Excel / 雲端匯出"
+        f"📊 {table_scope_label}與 Excel / 雲端匯出"
     ])
 
     # ----------------- 後台 TAB 1: 左圖右表複核 -----------------
