@@ -10,6 +10,7 @@ import hmac
 import hashlib
 import time
 import socket
+import threading
 from datetime import datetime
 import streamlit as st
 import pandas as pd
@@ -442,25 +443,41 @@ def retry_failed_drive_uploads(webhook_url: str):
             pass
     return success_ids, fail_ids
 
+_case_id_lock = threading.Lock()
+_reserved_case_ids = set()
+
 def generate_case_id() -> str:
     """
     產生簡化版案件編號：{民國年}-{序號}，如 115-01、115-02...
     序號依當年度已存在的案件編號自動接續編下去（與其他年度或舊格式編號互不影響）。
+
+    這裡會先搶一把全伺服器共用的鎖，並把剛發出去的編號立刻記在 (同一個 process 內
+    所有使用者共用的) 記憶體名單裡：單純「讀檔案、取最大值加一」在兩筆申請幾乎同時
+    送出時，有可能兩邊都在對方真正存檔前讀到同一個「目前最大序號」，拿到一模一樣的
+    案件編號——後存檔的那筆會直接覆蓋掉先存檔那筆的資料與照片檔案 (檔名完全相同)。
     """
-    roc_year = datetime.now().year - 1911
-    prefix = f"{roc_year}-"
-    pattern = re.compile(rf"^{roc_year}-(\d+)$")
+    with _case_id_lock:
+        roc_year = datetime.now().year - 1911
+        prefix = f"{roc_year}-"
+        pattern = re.compile(rf"^{roc_year}-(\d+)$")
 
-    max_seq = 0
-    # 同時參考檔案內最新資料、刪除前備份與目前畫面資料：避免多人同時送件時編號重複，
-    # 也避免已刪除案件的編號被重複使用 (紙本申請表上已註記該編號)
-    known_ids = load_all_known_case_ids() + [str(r.get("id", "")) for r in st.session_state.records]
-    for cid in known_ids:
-        m = pattern.match(cid)
-        if m:
-            max_seq = max(max_seq, int(m.group(1)))
+        max_seq = 0
+        # 同時參考檔案內最新資料、刪除前備份、目前畫面資料，以及這個 process 裡剛發出去
+        # 但可能還沒存檔的編號：避免多人同時送件時編號重複，也避免已刪除案件的編號被
+        # 重複使用 (紙本申請表上已註記該編號)
+        known_ids = (
+            load_all_known_case_ids()
+            + [str(r.get("id", "")) for r in st.session_state.records]
+            + list(_reserved_case_ids)
+        )
+        for cid in known_ids:
+            m = pattern.match(cid)
+            if m:
+                max_seq = max(max_seq, int(m.group(1)))
 
-    return f"{prefix}{max_seq + 1:02d}"
+        new_id = f"{prefix}{max_seq + 1:02d}"
+        _reserved_case_ids.add(new_id)
+        return new_id
 
 SECRETS_FILE = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 DEFAULT_ADMIN_PASSWORD = "ttfd888"
