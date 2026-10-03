@@ -247,6 +247,17 @@ def flash_error(msg: str):
     """同 flash_success()，用於失敗訊息。"""
     st.session_state["_flash"] = ("error", msg)
 
+def case_sort_key(r):
+    """
+    依案號 (如 115-42) 的年度與序號數值排序，而不是資料載入的原始順序——否則像「從雲端試算表
+    復原資料」是逐分頁 (逐獎學金類別) 處理，會讓清單看起來一下子案號很大、一下子案號又很小
+    (先列完一種類別，才接著列下一種類別)；批次處理時也需要照這個順序，進度才好掌握。
+    """
+    m = re.match(r"^(\d+)-(\d+)$", str(r.get("id", "")))
+    if m:
+        return (0, int(m.group(1)), int(m.group(2)))
+    return (1, 0, str(r.get("id", "")))
+
 def select_keep_images(ai_result, images, labels):
     """
     只挑出「獎學金申請表」那一張影像留在系統本機（供左圖右表複核時檢視），其餘附件影像
@@ -1152,13 +1163,16 @@ else:
         if not my_records:
             st.info("目前尚無任何案件資料。")
         else:
-            restore_candidates = [
-                r for r in my_records
-                if not r.get("review_confirmed")
-                and r.get("drive_photo_links")
-                and not r.get("images")
-                and not r.get("image_paths")
-            ]
+            restore_candidates = sorted(
+                (
+                    r for r in my_records
+                    if not r.get("review_confirmed")
+                    and r.get("drive_photo_links")
+                    and not r.get("images")
+                    and not r.get("image_paths")
+                ),
+                key=case_sort_key,
+            )
             if restore_candidates:
                 with st.expander(f"🖼️ 有 {len(restore_candidates)} 筆尚未複審的案件還沒顯示申請表照片，可一次批次還原", expanded=False):
                     st.caption(
@@ -1559,17 +1573,8 @@ else:
         if not my_records:
             st.info("尚無審核紀錄。")
         else:
-            def _case_sort_key(r):
-                # 依案號 (如 115-42) 的年度與序號數值排序，而不是資料載入的原始順序——
-                # 否則像「從雲端試算表復原資料」是逐分頁 (逐獎學金類別) 處理，會讓總表看起來
-                # 一下子案號很大、一下子案號又很小 (先列完一種類別，才接著列下一種類別)。
-                m = re.match(r"^(\d+)-(\d+)$", str(r.get("id", "")))
-                if m:
-                    return (0, int(m.group(1)), int(m.group(2)))
-                return (1, 0, str(r.get("id", "")))
-
             table_rows = []
-            for idx, r in enumerate(sorted(my_records, key=_case_sort_key), 1):
+            for idx, r in enumerate(sorted(my_records, key=case_sort_key), 1):
                 att = r.get("attachments", {})
                 att_keys = [
                     ("application_form", "申請表"),
