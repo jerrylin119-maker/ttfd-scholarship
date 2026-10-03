@@ -345,6 +345,58 @@ def resync_from_sheets_overwrite(webhook_url: str):
         pass
     return True, (added, updated)
 
+def batch_restore_application_forms(webhook_url: str, api_key: str, candidates: list, limit: int = 15):
+    """
+    批次把「還沒複審完畢」的案件的申請表照片抓回來顯示——跟之前一次當機的原因不同：
+    這裡每一筆案件處理完就立刻存檔、釋放記憶體，才處理下一筆，不會把一堆案件的照片同時
+    疊在記憶體裡；下載本身也已經是平行下載 (見 Apps Script downloadPhotos_)，不會逐張排隊等。
+    每次呼叫最多處理 `limit` 筆，避免單次點擊跑太久；案件數比 limit 多時，使用者可以再點一次繼續。
+    candidates: 已經篩選過「review_confirmed 不是 True、有 drive_photo_links、本機還沒有照片」的案件清單。
+    回傳 (成功清單, 失敗清單, 剩餘未處理筆數)。
+    """
+    todo = candidates[:limit]
+    remaining = max(0, len(candidates) - limit)
+    done, failed = [], []
+    for r in todo:
+        case_id = r.get("id", "")
+        marked_url = r.get("marked_form_drive_url")
+        try:
+            if marked_url:
+                ok_dl, dl_result = download_photos_from_drive(webhook_url, [marked_url])
+                kept_images = dl_result if ok_dl else []
+                kept_labels = ["獎學金申請表"] if ok_dl else []
+            else:
+                links = r.get("drive_photo_links") or []
+                ok_dl, dl_result = download_photos_from_drive(webhook_url, links)
+                if not ok_dl:
+                    kept_images, kept_labels = [], []
+                elif api_key and len(dl_result) > 1:
+                    fallback_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
+                    try:
+                        id_result = analyze_scholarship_documents(dl_result, api_key, "gemini-3.6-flash")
+                        kept_images, kept_labels = select_keep_images(id_result, dl_result, fallback_labels)
+                    except Exception:
+                        kept_images, kept_labels = dl_result, fallback_labels
+                else:
+                    kept_images = dl_result
+                    kept_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
+            if not kept_images:
+                failed.append(case_id)
+                continue
+            r["images"] = kept_images
+            r["image_labels"] = kept_labels
+            r.pop("marked_form_drive_url", None)
+            save_case_to_storage(r, skip_excel=True)
+            done.append(case_id)
+        except Exception:
+            failed.append(case_id)
+    if done:
+        try:
+            append_case_to_excel(load_records_json())
+        except Exception:
+            pass
+    return done, failed, remaining
+
 def retry_failed_drive_uploads(webhook_url: str):
     """
     對「線上審核」但尚未成功備份至雲端硬碟的案件重新嘗試上傳。
@@ -1100,6 +1152,39 @@ else:
         if not my_records:
             st.info("目前尚無任何案件資料。")
         else:
+            restore_candidates = [
+                r for r in my_records
+                if not r.get("review_confirmed")
+                and r.get("drive_photo_links")
+                and not r.get("images")
+                and not r.get("image_paths")
+            ]
+            if restore_candidates:
+                with st.expander(f"🖼️ 有 {len(restore_candidates)} 筆尚未複審的案件還沒顯示申請表照片，可一次批次還原", expanded=False):
+                    st.caption(
+                        "適用於系統重啟後，已經點過「復原資料」跟「補回連結」，但案件還是看不到照片的情況。"
+                        "只處理「尚未複審完畢」的案件（已複審過的不需要再看照片），每次最多處理 15 筆，"
+                        "一筆處理完就立刻存檔釋放記憶體才處理下一筆，案件數比較多時請分批多點幾次。"
+                    )
+                    if st.button(f"📥 批次還原申請表照片（最多 15 筆）", key="batch_restore_forms_btn", use_container_width=True):
+                        batch_webhook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                        batch_api_key = st.session_state.get("api_key") or load_persistent_api_key()
+                        if not batch_webhook:
+                            st.error("❌ 系統尚未設定 Google 試算表 Webhook 網址！")
+                        else:
+                            with st.spinner(f"正在批次還原（共 {min(15, len(restore_candidates))} 筆）..."):
+                                done, failed, remaining = batch_restore_application_forms(
+                                    batch_webhook, batch_api_key, restore_candidates, limit=15
+                                )
+                            msg = f"✅ 已還原 {len(done)} 筆案件的申請表照片。"
+                            if failed:
+                                msg += f" ❌ {len(failed)} 筆失敗：{', '.join(failed)}。"
+                            if remaining:
+                                msg += f" 還剩 {remaining} 筆，請再點一次繼續處理。"
+                            flash_success(msg)
+                            st.session_state.records = load_stored_cases()
+                            st.rerun()
+
             case_options = {
                 r["id"]: (
                     ("⚠️AI待複核 " if r.get("ai_failed") else "")
