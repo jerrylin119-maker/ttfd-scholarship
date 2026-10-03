@@ -363,7 +363,7 @@ def batch_restore_application_forms(webhook_url: str, api_key: str, candidates: 
     疊在記憶體裡；下載本身也已經是平行下載 (見 Apps Script downloadPhotos_)，不會逐張排隊等。
     每次呼叫最多處理 `limit` 筆，避免單次點擊跑太久；案件數比 limit 多時，使用者可以再點一次繼續。
     candidates: 已經篩選過「review_confirmed 不是 True、有 drive_photo_links、本機還沒有照片」的案件清單。
-    回傳 (成功清單, 失敗清單, 剩餘未處理筆數)。
+    回傳 (成功清單, 失敗清單[(案號, 原因)], 剩餘未處理筆數)。
     """
     todo = candidates[:limit]
     remaining = max(0, len(candidates) - limit)
@@ -376,9 +376,11 @@ def batch_restore_application_forms(webhook_url: str, api_key: str, candidates: 
                 ok_dl, dl_result = download_photos_from_drive(webhook_url, [marked_url])
                 kept_images = dl_result if ok_dl else []
                 kept_labels = ["獎學金申請表"] if ok_dl else []
+                dl_error = None if ok_dl else dl_result
             else:
                 links = r.get("drive_photo_links") or []
                 ok_dl, dl_result = download_photos_from_drive(webhook_url, links)
+                dl_error = None if ok_dl else dl_result
                 if not ok_dl:
                     kept_images, kept_labels = [], []
                 elif api_key and len(dl_result) > 1:
@@ -392,15 +394,15 @@ def batch_restore_application_forms(webhook_url: str, api_key: str, candidates: 
                     kept_images = dl_result
                     kept_labels = [f"雲端硬碟還原照片 {i+1}" for i in range(len(dl_result))]
             if not kept_images:
-                failed.append(case_id)
+                failed.append((case_id, dl_error or "下載後沒有可用的照片"))
                 continue
             r["images"] = kept_images
             r["image_labels"] = kept_labels
             r.pop("marked_form_drive_url", None)
             save_case_to_storage(r, skip_excel=True)
             done.append(case_id)
-        except Exception:
-            failed.append(case_id)
+        except Exception as e:
+            failed.append((case_id, str(e)))
     if done:
         try:
             append_case_to_excel(load_records_json())
@@ -1190,12 +1192,17 @@ else:
                                 done, failed, remaining = batch_restore_application_forms(
                                     batch_webhook, batch_api_key, restore_candidates, limit=15
                                 )
-                            msg = f"✅ 已還原 {len(done)} 筆案件的申請表照片。"
-                            if failed:
-                                msg += f" ❌ {len(failed)} 筆失敗：{', '.join(failed)}。"
-                            if remaining:
-                                msg += f" 還剩 {remaining} 筆，請再點一次繼續處理。"
-                            flash_success(msg)
+                            if done:
+                                msg = f"✅ 已還原 {len(done)} 筆案件的申請表照片：{', '.join(done)}。"
+                                if failed:
+                                    fail_detail = "；".join(f"{cid}（{reason}）" for cid, reason in failed)
+                                    msg += f" ❌ {len(failed)} 筆失敗：{fail_detail}。"
+                                if remaining:
+                                    msg += f" 還剩 {remaining} 筆，請再點一次繼續處理。"
+                                flash_success(msg)
+                            else:
+                                fail_detail = "；".join(f"{cid}（{reason}）" for cid, reason in failed) or "未知原因"
+                                flash_error(f"❌ 這次 {len(failed)} 筆全部還原失敗，沒有任何案件的照片被還原：{fail_detail}")
                             st.session_state.records = load_stored_cases()
                             st.rerun()
 
