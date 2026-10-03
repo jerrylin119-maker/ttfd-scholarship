@@ -399,6 +399,7 @@ def batch_restore_application_forms(webhook_url: str, api_key: str, candidates: 
                 continue
             r["images"] = kept_images
             r["image_labels"] = kept_labels
+            r["review_mode"] = "online"  # 申請表照片已成功還原，改回線上審核：之後留在「紙本審核」的，就是真正還原失敗、需要人工跟紙本比對的案件
             r.pop("marked_form_drive_url", None)
             save_case_to_storage(r, skip_excel=True)
             done.append(case_id)
@@ -1274,6 +1275,7 @@ else:
                         if ok_dl and dl_result:
                             curr_case["images"] = dl_result
                             curr_case["image_labels"] = ["獎學金申請表"]
+                            curr_case["review_mode"] = "online"  # 申請表照片已成功還原，改回線上審核
                             curr_case.pop("marked_form_drive_url", None)
                             curr_case.pop("_suggested_form_idx", None)
                             st.session_state.records[curr_case_idx] = curr_case
@@ -1307,6 +1309,7 @@ else:
                                 curr_case["_suggested_form_idx"] = idx - 1
                         except Exception:
                             pass
+                    curr_case["review_mode"] = "online"  # 照片已成功還原，改回線上審核
                     st.session_state.records[curr_case_idx] = curr_case
                     save_case_to_storage(curr_case)
                     flash_success(f"✅ 已從雲端硬碟還原 {len(dl_result)} 張照片！請在下方確認哪一張是申請表。")
