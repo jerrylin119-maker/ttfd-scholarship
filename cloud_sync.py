@@ -418,6 +418,46 @@ function installDailyBackupTrigger() {
     .create();
 }
 
+// 一次性整理用：把目前「已經存在」的分頁都整理好 (依案件編號排序、欄寬自動撐開顯示完整文字)。
+// 日後每次系統同步都會自動依編號排序 (見 upsertRows_)，但那只套用在同步當下有送資料的分頁；
+// 要把現在試算表「已經亂掉」的狀態馬上整理好，就在 Apps Script 編輯器選這個函式、按執行即可，
+// 只會整理格式 (順序、欄寬)，不會新增、刪除或修改任何一筆案件的實際內容。
+function tidyUpAllSheets() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  for (var s = 0; s < sheets.length; s++) {
+    var sheet = sheets[s];
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+    if (lastRow < 1 || lastCol < 1) continue;
+    var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    var idIdx = headers.indexOf("案件編號");
+    // 只整理「目前系統格式」的分頁 (有案件編號欄)，像「總表」這種沒有這個欄位的舊分頁不動它，
+    // 避免誤動到跟現在系統無關的舊資料。
+    if (idIdx === -1) {
+      sheet.autoResizeColumns(1, lastCol);
+      continue;
+    }
+    if (lastRow >= 2) {
+      var existing = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+      existing.sort(function (a, b) {
+        var ka = _caseIdSortKey_(String(a[idIdx] || ""));
+        var kb = _caseIdSortKey_(String(b[idIdx] || ""));
+        if (ka[0] !== kb[0]) return ka[0] - kb[0];
+        if (ka[1] !== kb[1]) return ka[1] - kb[1];
+        if (ka[2] !== kb[2]) return ka[2] - kb[2];
+        return ka[3] < kb[3] ? -1 : (ka[3] > kb[3] ? 1 : 0);
+      });
+      var seqIdx = headers.indexOf("序號");
+      if (seqIdx !== -1) {
+        for (var k = 0; k < existing.length; k++) existing[k][seqIdx] = k + 1;
+      }
+      sheet.getRange(2, 1, existing.length, lastCol).setValues(existing);
+    }
+    sheet.autoResizeColumns(1, lastCol);
+  }
+}
+
 // 列出目前雲端硬碟裡有哪些每日快照 (給系統「📅 從每日快照還原」功能選擇要還原哪一天用)
 function listBackupSnapshots_() {
   try {
