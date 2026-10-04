@@ -2213,3 +2213,40 @@ else:
                                     pass
                                 st.session_state["reassign_result"] = ("ok", text)
                             st.rerun()
+
+        # ----------------- 清除試算表殘留案件 (本機已經沒有對應資料、只有試算表還留著舊的一列) -----------------
+        if can_manage_system():
+            st.markdown("---")
+            st.markdown('<div class="section-title">🧹 清除雲端試算表殘留案件（本機已無對應資料）</div>', unsafe_allow_html=True)
+            with st.expander("展開清除工具（僅業務科可用，請先確認本機真的沒有這筆資料再使用）", expanded=False):
+                st.caption(
+                    "正常的刪除／改編號都會連動處理本機跟試算表。但如果案件編號在本機已經被改掉或刪除，"
+                    "試算表卻還留著一列舊資料（例如本機某案件編號後來被改配成別的號碼，試算表上原本那一列沒有人記得去清），"
+                    "上面「修正編號衝突」工具找不到這筆本機資料可以選，這裡可以直接指定案件編號跟所屬類別分頁，"
+                    "只刪除試算表那一列，不會動到本機、也不會動到試算表上其他任何案件。"
+                )
+                col_cid, col_ctype = st.columns(2)
+                with col_cid:
+                    clean_id = st.text_input("要清除的案件編號（例如 115-81）：", key="sheet_clean_id")
+                with col_ctype:
+                    clean_type = st.selectbox("所屬獎學金類別分頁：", get_scholarship_types(), key="sheet_clean_type")
+                if st.session_state.get("sheet_clean_result"):
+                    kind, text = st.session_state.pop("sheet_clean_result")
+                    (st.success if kind == "ok" else st.error)(text)
+                if clean_id.strip() and st.button(f"🧹 從試算表【{clean_type}】分頁刪除【{clean_id.strip()}】", key="sheet_clean_btn"):
+                    still_local = any(str(r.get("id", "")) == clean_id.strip() for r in load_records_json())
+                    if still_local:
+                        st.session_state["sheet_clean_result"] = (
+                            "err", f"❌ 本機目前還有案件編號 {clean_id.strip()}，請改用上面「修正編號衝突」或「刪除指定案件」工具，不要用這個。"
+                        )
+                    else:
+                        hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                        if not hook:
+                            st.session_state["sheet_clean_result"] = ("err", "❌ 系統尚未設定 Google 試算表 Webhook 網址！")
+                        else:
+                            try:
+                                ok_del, msg_del = delete_from_google_sheets(hook, [{"id": clean_id.strip(), "scholarship_type": clean_type}])
+                                st.session_state["sheet_clean_result"] = ("ok" if ok_del else "err", f"{'✅' if ok_del else '❌'} {msg_del}")
+                            except Exception as e:
+                                st.session_state["sheet_clean_result"] = ("err", f"❌ {e}")
+                    st.rerun()
