@@ -151,12 +151,32 @@ function upsertRows_(sheet, rows) {
       if (id) idToIndex[id] = existing.length - 1;
     }
   }
+  // 依「案件編號」數值大小排序整張表：新案件一律是 push 到陣列最後面再寫回去，
+  // 單純靠這個順序寫入的話，試算表列的物理順序會變成「依同步時間」而不是「依案件編號」，
+  // 導致像 115-01 這種小編號的案件，因為比較晚才同步到，反而出現在表格很後面的位置，
+  // 人工核對、列印簽名時很難照編號順序檢查。這裡排序後再寫入，表格列順序就會跟案件編號一致。
+  existing.sort(function (a, b) {
+    var ka = _caseIdSortKey_(String(a[ID_COL_ - 1] || ""));
+    var kb = _caseIdSortKey_(String(b[ID_COL_ - 1] || ""));
+    if (ka[0] !== kb[0]) return ka[0] - kb[0];
+    if (ka[1] !== kb[1]) return ka[1] - kb[1];
+    if (ka[2] !== kb[2]) return ka[2] - kb[2];
+    return ka[3] < kb[3] ? -1 : (ka[3] > kb[3] ? 1 : 0);
+  });
   for (var k = 0; k < existing.length; k++) {
     existing[k][0] = k + 1; // 重新編排序號欄
   }
   if (existing.length > 0) {
     sheet.getRange(2, 1, existing.length, numCols).setValues(existing);
   }
+}
+
+// 把「115-42」這種案件編號拆成可以排序比較的鍵值；格式不符的 (例如空白或舊格式編號)
+// 一律排到最後面，不會把正常編號的順序弄亂。
+function _caseIdSortKey_(id) {
+  var m = id.match(/^(\d+)-(\d+)$/);
+  if (m) return [0, parseInt(m[1], 10), parseInt(m[2], 10), id];
+  return [1, 0, 0, id];
 }
 
 // 重新編排「序號」欄 (第 1 欄)，讓畫面上的序號維持連續，不影響案件編號等其他欄位
