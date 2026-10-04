@@ -74,14 +74,14 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     ineligible_count = sum(1 for r in records if r.get("review_status") == "不符資格")
     pass_rate = f"{(eligible_count / total_count * 100):.1f}%" if total_count > 0 else "0.0%"
 
-    # 1. 標題與副標題 (A1:N1, A2:N2)
-    ws.merge_cells("A1:N1")
+    # 1. 標題與副標題 (A1:O1, A2:O2)
+    ws.merge_cells("A1:O1")
     ws["A1"] = f"🚒 臺東縣消防局 {type_label} 審核彙總名冊"
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
     ws.row_dimensions[1].height = 35
 
-    ws.merge_cells("A2:N2")
+    ws.merge_cells("A2:O2")
     now_str = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
     ws["A2"] = f"匯出機關：臺東縣消防局  |  匯出時間：{now_str}  |  審核門檻：學期總平均 >= 80.0 且 5 項附件齊全"
     ws["A2"].font = font_subtitle
@@ -94,7 +94,7 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
         ("C3", "E3", "C4", "E4", "符合資格", f"{eligible_count} 件"),
         ("F3", "H3", "F4", "H4", "待補件", f"{pending_count} 件"),
         ("I3", "K3", "I4", "K4", "不符資格", f"{ineligible_count} 件"),
-        ("L3", "N3", "L4", "N4", "核定通過率", pass_rate)
+        ("L3", "O3", "L4", "O4", "核定通過率", pass_rate)
     ]
 
     for l_start, l_end, v_start, v_end, label, val in summary_items:
@@ -114,9 +114,9 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     ws.row_dimensions[4].height = 24
     ws.row_dimensions[5].height = 10
 
-    # 3. 表頭 (Row 6) - 含「案件編號」
+    # 3. 表頭 (Row 6) - 含「案件編號」與「複審完畢」(緊接案件編號之後，方便檢核)
     headers = [
-        "序號", "案件編號", "大隊 / 局本部", "分隊 / 科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
+        "序號", "案件編號", "複審完畢", "大隊 / 局本部", "分隊 / 科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
         "學期總平均", "操行成績", "附件檢核狀況 (5項)", "審核結果", "審核判定說明 / 備註", "承辦人複核簽章"
     ]
 
@@ -153,9 +153,12 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
         gpa = r.get("semester_gpa")
         gpa_val = f"{gpa:.2f}" if gpa is not None else "無"
 
+        confirmed_text = f"✅ {r.get('review_confirmed_by', '')}".strip() if r.get("review_confirmed") else ""
+
         row_values = [
             idx,
             r.get("id", f"CASE-{idx:03d}"),
+            confirmed_text,
             r.get("unit_level1", "未指定"),
             r.get("unit_level2", "未指定"),
             r.get("applicant_name", ""),
@@ -178,13 +181,13 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
             if idx % 2 == 0:
                 cell.fill = fill_zebra
 
-            # 文字對齊：判定說明靠左，其餘置中
-            if col_idx in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14):
-                cell.alignment = align_center
-            else:
+            # 文字對齊：判定說明 (col 14) 靠左，其餘置中
+            if col_idx == 14:
                 cell.alignment = align_left
+            else:
+                cell.alignment = align_center
 
-            if col_idx == 12:  # 審核結果欄位顏色
+            if col_idx == 13:  # 審核結果欄位顏色
                 if status == "符合資格":
                     cell.font = font_status_eligible
                     cell.fill = fill_eligible
@@ -200,18 +203,19 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     column_min_widths = {
         1: 8,   # 序號
         2: 18,  # 案件編號
-        3: 16,  # 大隊/局本部
-        4: 16,  # 分隊/科室
-        5: 14,  # 申請人
-        6: 16,  # 身分證
-        7: 14,  # 子女姓名
-        8: 14,  # 組別
-        9: 14,  # 學期總平均
-        10: 12, # 操行
-        11: 24, # 附件檢核
-        12: 14, # 審核結果
-        13: 36, # 判定說明
-        14: 16  # 簽章
+        3: 14,  # 複審完畢
+        4: 16,  # 大隊/局本部
+        5: 16,  # 分隊/科室
+        6: 14,  # 申請人
+        7: 16,  # 身分證
+        8: 14,  # 子女姓名
+        9: 14,  # 組別
+        10: 14, # 學期總平均
+        11: 12, # 操行
+        12: 24, # 附件檢核
+        13: 14, # 審核結果
+        14: 36, # 判定說明
+        15: 16  # 簽章
     }
 
     for col_idx, min_w in column_min_widths.items():

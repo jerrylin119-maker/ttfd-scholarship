@@ -315,6 +315,31 @@ def sync_latest_to_google_sheets(webhook_url: str):
         return False, "目前系統內沒有任何案件資料，為避免清空雲端試算表，已略過同步"
     return sync_to_google_sheets(webhook_url, latest)
 
+def save_review_and_sync(case_dict: dict, local_msg: str):
+    """
+    大隊/業務科複核存檔用：先存本機，再立刻同步一次雲端試算表。
+    先前「☁️ 雲端試算表一鍵同步」只有業務科看得到、且要手動點，大隊同仁複核存檔／確認複審完畢
+    都只有存到本機 (伺服器重啟就會消失)，業務科沒剛好手動同步的話，複核進度會完全救不回來。
+    這裡讓每一次複核存檔都順便自動同步，才真的做到「隨存隨備份」。
+    """
+    save_case_to_storage(case_dict, skip_excel=True)
+    try:
+        append_case_to_excel(load_records_json())
+    except Exception:
+        pass
+    webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+    if not webhook_url:
+        flash_success(f"{local_msg}（⚠️ 尚未設定雲端試算表，僅存於本機，伺服器重啟可能遺失）")
+        return
+    try:
+        ok_sync, sync_msg = sync_latest_to_google_sheets(webhook_url)
+    except Exception as e:
+        ok_sync, sync_msg = False, str(e)
+    if ok_sync:
+        flash_success(f"{local_msg}（已同步雲端試算表）")
+    else:
+        flash_error(f"{local_msg}，但同步雲端試算表失敗：{sync_msg}（目前僅存於本機，請稍後重試或通知業務科手動同步，避免伺服器重啟時遺失）")
+
 def resync_from_sheets_overwrite(webhook_url: str):
     """
     從雲端試算表把『所有』案件的文字欄位抓回來——本機已存在的案件編號也會用試算表內容覆蓋更新，
@@ -1512,8 +1537,7 @@ else:
                         curr_case["ai_failed"] = False
 
                         st.session_state.records[curr_case_idx] = curr_case
-                        save_case_to_storage(curr_case)
-                        flash_success(f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
+                        save_review_and_sync(curr_case, f"已成功儲存【{curr_case['id']}】的複核結果並更新總表！")
                         st.rerun()
 
                 st.markdown("---")
@@ -1527,8 +1551,7 @@ else:
                         curr_case.pop("review_confirmed_by", None)
                         curr_case.pop("review_confirmed_at", None)
                         st.session_state.records[curr_case_idx] = curr_case
-                        save_case_to_storage(curr_case)
-                        flash_success(f"已取消【{curr_case['id']}】的複審完畢標記。")
+                        save_review_and_sync(curr_case, f"已取消【{curr_case['id']}】的複審完畢標記。")
                         st.rerun()
                 else:
                     if st.button("✅ 確認複審完畢（申請表及附件已核對無誤）", key=f"confirm_review_{curr_case['id']}", type="primary", use_container_width=True):
@@ -1536,8 +1559,7 @@ else:
                         curr_case["review_confirmed_by"] = actor_label()
                         curr_case["review_confirmed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         st.session_state.records[curr_case_idx] = curr_case
-                        save_case_to_storage(curr_case)
-                        flash_success(f"✅ 已將【{curr_case['id']}】標記為複審完畢！")
+                        save_review_and_sync(curr_case, f"✅ 已將【{curr_case['id']}】標記為複審完畢！")
                         st.rerun()
 
     # ----------------- 後台 TAB 2: 承辦人代為上傳 -----------------
