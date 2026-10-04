@@ -89,13 +89,21 @@ function getOrCreateSheet_(ss, name) {
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(SHEET_HEADERS_);
     sheet.getRange(1, 1, 1, SHEET_HEADERS_.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
-  } else if (sheet.getLastColumn() < SHEET_HEADERS_.length) {
-    // 既有分頁後來新增了欄位 (例如「複審完畢」)：把缺的表頭直接補到最後面，不影響既有資料欄位順序
-    var fromCol = sheet.getLastColumn() + 1;
-    var missing = SHEET_HEADERS_.slice(fromCol - 1);
-    var range = sheet.getRange(1, fromCol, 1, missing.length);
-    range.setValues([missing]);
-    range.setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+  } else {
+    // 既有分頁的表頭文字跟目前的 SHEET_HEADERS_ 比對：只要有任何一欄文字對不上 (包含後來
+    // 新增的「複審完畢」，或表頭列本身歷史上曾經缺字)，就把整列表頭重寫成正確版本。
+    // 只改表頭文字本身，不動任何資料列，而且後面的程式都是「依欄位固定位置」讀寫資料，
+    // 不是依表頭文字讀寫，所以修正表頭不會讓既有資料跑位。
+    var currentHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    var needsFix = false;
+    for (var h = 0; h < SHEET_HEADERS_.length; h++) {
+      if (currentHeaders[h] !== SHEET_HEADERS_[h]) { needsFix = true; break; }
+    }
+    if (needsFix) {
+      var range = sheet.getRange(1, 1, 1, SHEET_HEADERS_.length);
+      range.setValues([SHEET_HEADERS_]);
+      range.setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+    }
   }
   return sheet;
 }
