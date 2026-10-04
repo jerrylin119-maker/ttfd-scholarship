@@ -472,6 +472,17 @@ def retry_failed_drive_uploads(webhook_url: str):
 _case_id_lock = threading.Lock()
 _reserved_case_ids = set()
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _sheet_known_case_ids_cached(webhook_url: str):
+    """實際呼叫 Google 試算表查詢目前有哪些案件編號；快取 60 秒，避免每送一筆新案件就呼叫一次。"""
+    try:
+        ok, result = fetch_cases_from_google_sheets(webhook_url)
+        if ok:
+            return [str(r.get("id", "")) for r in result]
+    except Exception:
+        pass
+    return []
+
 def generate_case_id() -> str:
     """
     產生簡化版案件編號：{民國年}-{序號}，如 115-01、115-02...
@@ -481,6 +492,12 @@ def generate_case_id() -> str:
     所有使用者共用的) 記憶體名單裡：單純「讀檔案、取最大值加一」在兩筆申請幾乎同時
     送出時，有可能兩邊都在對方真正存檔前讀到同一個「目前最大序號」，拿到一模一樣的
     案件編號——後存檔的那筆會直接覆蓋掉先存檔那筆的資料與照片檔案 (檔名完全相同)。
+
+    另外也會查一次 Google 試算表目前有哪些編號：伺服器重啟後本機 ./data/ 會被清空，
+    若在業務科點「從雲端試算表復原資料」之前就有新案件送出，單純看本機檔案會誤以為
+    那些編號還沒用過，結果發出一個試算表裡其實已經有真實案件在用的編號，新案件存檔時
+    會直接把那筆舊案件的試算表資料覆蓋掉。查詢失敗 (例如未設定 Webhook) 不會擋下送件，
+    只是退回原本只看本機的行為。
     """
     with _case_id_lock:
         roc_year = datetime.now().year - 1911
@@ -488,14 +505,17 @@ def generate_case_id() -> str:
         pattern = re.compile(rf"^{roc_year}-(\d+)$")
 
         max_seq = 0
-        # 同時參考檔案內最新資料、刪除前備份、目前畫面資料，以及這個 process 裡剛發出去
-        # 但可能還沒存檔的編號：避免多人同時送件時編號重複，也避免已刪除案件的編號被
-        # 重複使用 (紙本申請表上已註記該編號)
+        # 同時參考檔案內最新資料、刪除前備份、目前畫面資料、這個 process 裡剛發出去
+        # 但可能還沒存檔的編號，以及雲端試算表目前的真實狀態：避免多人同時送件時編號
+        # 重複，也避免已刪除案件的編號被重複使用 (紙本申請表上已註記該編號)
         known_ids = (
             load_all_known_case_ids()
             + [str(r.get("id", "")) for r in st.session_state.records]
             + list(_reserved_case_ids)
         )
+        webhook_url = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+        if webhook_url:
+            known_ids += _sheet_known_case_ids_cached(webhook_url)
         for cid in known_ids:
             m = pattern.match(cid)
             if m:
