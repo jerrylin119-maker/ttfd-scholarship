@@ -356,7 +356,7 @@ def resync_from_sheets_overwrite(webhook_url: str):
     text_fields = (
         "scholarship_type", "unit_level1", "unit_level2", "applicant_name", "applicant_id",
         "child_name", "category", "semester_gpa", "conduct", "attachments", "review_status",
-        "review_reason", "is_eligible"
+        "review_reason", "is_eligible", "review_confirmed", "review_confirmed_by"
     )
     added, updated = 0, 0
     for r in fetch_result:

@@ -73,9 +73,11 @@ function exportAllSheets_() {
   }
 }
 
+// 「複審完畢」刻意放在最後一欄，不是緊接著「案件編號」：既有分頁已經有資料了，新增欄位只能
+// 用「補在最後面」的方式升級表頭，如果硬插在中間，既有分頁的表頭文字會跟實際資料欄位對不起來。
 var SHEET_HEADERS_ = [
   "序號", "案件編號", "獎學金類別", "大隊/局本部", "分隊/科室", "申請人姓名", "身分證字號", "子女姓名", "申請組別",
-  "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "雲端硬碟連結", "最後同步時間"
+  "學期總平均", "操行成績", "附件檢核(5項)", "審核結果", "判定理由說明", "雲端硬碟連結", "最後同步時間", "複審完畢"
 ];
 var ID_COL_ = 2; // 「案件編號」是第 2 欄
 
@@ -87,6 +89,13 @@ function getOrCreateSheet_(ss, name) {
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(SHEET_HEADERS_);
     sheet.getRange(1, 1, 1, SHEET_HEADERS_.length).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+  } else if (sheet.getLastColumn() < SHEET_HEADERS_.length) {
+    // 既有分頁後來新增了欄位 (例如「複審完畢」)：把缺的表頭直接補到最後面，不影響既有資料欄位順序
+    var fromCol = sheet.getLastColumn() + 1;
+    var missing = SHEET_HEADERS_.slice(fromCol - 1);
+    var range = sheet.getRange(1, fromCol, 1, missing.length);
+    range.setValues([missing]);
+    range.setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
   }
   return sheet;
 }
@@ -124,7 +133,8 @@ function upsertRows_(sheet, rows) {
       r.review_status || "",
       r.review_reason || "",
       r.drive_links || "",
-      now
+      now,
+      r.review_confirmed || ""
     ];
     if (id && idToIndex.hasOwnProperty(id)) {
       existing[idToIndex[id]] = rowValues;
@@ -443,7 +453,8 @@ function restoreFromSnapshot_(data) {
           attachment_desc: rec["附件檢核(5項)"] || "",
           review_status: rec["審核結果"] || "",
           review_reason: rec["判定理由說明"] || "",
-          drive_links: rec["雲端硬碟連結"] || ""
+          drive_links: rec["雲端硬碟連結"] || "",
+          review_confirmed: rec["複審完畢"] || ""
         });
       }
       if (rows.length > 0) {
@@ -510,7 +521,8 @@ def sync_to_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tu
             "attachment_desc": att_desc,
             "review_status": r.get("review_status", ""),
             "review_reason": r.get("review_reason", r.get("notes", "")),
-            "drive_links": " | ".join(r.get("drive_photo_links", []) or [])
+            "drive_links": " | ".join(r.get("drive_photo_links", []) or []),
+            "review_confirmed": (f"✅ {r.get('review_confirmed_by', '')}".strip() if r.get("review_confirmed") else "")
         })
         
     payload = {
@@ -609,6 +621,8 @@ def fetch_cases_from_google_sheets(webhook_url: str) -> Tuple[bool, Any]:
                 "review_status": status or "待審核",
                 "review_reason": str(row.get("判定理由說明", "") or ""),
                 "is_eligible": status == "符合資格",
+                "review_confirmed": str(row.get("複審完畢", "") or "").strip().startswith("✅"),
+                "review_confirmed_by": str(row.get("複審完畢", "") or "").strip().lstrip("✅").strip(),
                 "notes": f"⚠️ 本案件由雲端試算表復原，原始照片與確切送件時間已遺失。試算表最後同步時間：{sync_time or '未知'}",
                 "review_mode": "paper",  # 復原案件缺少原始照片，一律列為紙本審核
                 "drive_photo_links": [u.strip() for u in str(row.get("雲端硬碟連結", "") or "").split("|") if u.strip()],
