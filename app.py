@@ -34,6 +34,7 @@ from storage_manager import (
     JSON_FILE,
     load_all_known_case_ids,
     delete_cases_from_storage,
+    reassign_case_id,
     package_uploads_zip,
     EXCEL_FILE,
     UPLOADS_DIR,
@@ -2137,3 +2138,73 @@ else:
                         }),
                         use_container_width=True, hide_index=True
                     )
+
+        # ----------------- 修正編號衝突 (兩筆不同案件誤用同一個案件編號) -----------------
+        st.markdown("---")
+        st.markdown('<div class="section-title">🔀 修正編號衝突（兩筆不同案件誤用同一個案件編號）</div>', unsafe_allow_html=True)
+        with st.expander("展開編號修正工具", expanded=False):
+            if not can_delete():
+                st.info("🔒 舊版共用密碼帳號沒有這個權限，請改用「業務科」或「各大隊」專屬帳號登入。")
+            else:
+                st.caption(
+                    "案件編號在義消聯合總會獎助學金／本局津芳冰城陳慶銳先生獎學金兩種類別間是共用同一套流水號，"
+                    "如果發現兩筆完全不同的案件（不同申請人）用到同一個案件編號，用這裡把其中一筆改配一個全新的編號。"
+                    "只會改這一筆案件的編號跟照片檔名，不會動到另一筆、也不會動到其他任何案件。"
+                )
+                scope_now2 = current_scope()
+                stored_records2 = [r for r in load_records_json() if not scope_now2 or r.get("unit_level1") == scope_now2]
+                reassign_options = {
+                    str(r.get("id", "")): (
+                        f"{r.get('id', '')}｜{r.get('scholarship_type', '未分類')}｜"
+                        f"{r.get('unit_level1', '')}/{r.get('unit_level2', '')}｜"
+                        f"家長:{r.get('applicant_name', '') or '—'}｜子女:{r.get('child_name', '') or '—'}"
+                    )
+                    for r in stored_records2
+                }
+                if st.session_state.get("reassign_result"):
+                    kind, text = st.session_state.pop("reassign_result")
+                    (st.success if kind == "ok" else st.error)(text)
+
+                if not reassign_options:
+                    st.info("目前沒有可修正的案件。")
+                else:
+                    pick_old = st.selectbox(
+                        "選擇要改編號的那一筆案件（請選錯的、比較晚才確認的那一筆，不要選另一筆）：",
+                        options=list(reassign_options.keys()),
+                        format_func=lambda cid: reassign_options[cid],
+                        index=None,
+                        placeholder="選擇案件…",
+                        key="reassign_old_id"
+                    )
+                    if pick_old:
+                        suggested_new = generate_case_id()
+                        new_id_input = st.text_input(
+                            "改配的新編號（預設已自動填入目前確定沒人用過的下一個編號，一般不需要更改）：",
+                            value=suggested_new,
+                            key="reassign_new_id"
+                        )
+                        if st.button(f"🔀 把【{pick_old}】改成【{new_id_input}】", type="primary", key="reassign_btn"):
+                            ok_r, msg_r = reassign_case_id(pick_old, new_id_input.strip(), allowed_unit=current_scope(), actor=actor_label())
+                            if not ok_r:
+                                st.session_state["reassign_result"] = ("err", f"❌ {msg_r}")
+                            else:
+                                hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
+                                text = f"✅ {msg_r}"
+                                if hook:
+                                    try:
+                                        ok_del, msg_del = delete_from_google_sheets(hook, [pick_old])
+                                        text += f"　☁️ 舊編號從試算表移除：{msg_del}"
+                                    except Exception as e:
+                                        text += f"　⚠️ 舊編號從試算表移除失敗：{e}"
+                                    try:
+                                        ok_sync, msg_sync = sync_latest_to_google_sheets(hook)
+                                        text += f"　同步新編號：{'成功' if ok_sync else msg_sync}"
+                                    except Exception as e:
+                                        text += f"　⚠️ 同步新編號失敗：{e}"
+                                st.session_state.records = load_stored_cases()
+                                try:
+                                    st.session_state.records_mtime = os.path.getmtime(JSON_FILE)
+                                except OSError:
+                                    pass
+                                st.session_state["reassign_result"] = ("ok", text)
+                            st.rerun()

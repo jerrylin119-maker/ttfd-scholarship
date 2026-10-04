@@ -253,6 +253,81 @@ def delete_cases_from_storage(case_ids: List[str], allowed_unit: Optional[str] =
     deleted_ids = [str(r.get("id", "")) for r in to_delete]
     return deleted_ids, f"已刪除 {len(deleted_ids)} 筆案件，其餘 {len(keep)} 筆案件未受影響"
 
+def reassign_case_id(old_id: str, new_id: str, allowed_unit: Optional[str] = None,
+                      actor: str = "") -> Tuple[bool, str]:
+    """
+    把某一筆案件的案件編號改成另一個新編號 (用於修正兩筆不同案件誤用同一個編號的情況)。
+    只改這一筆案件的編號跟它本機照片檔名的前綴，不動任何其他案件；呼叫端仍需自行把舊編號
+    從 Google 試算表明確刪除、並重新同步，試算表才會跟著更新 (這裡只處理本機部分)。
+    allowed_unit: 若指定，只允許改動該大隊自己的案件。
+    """
+    ensure_directories()
+    old_id, new_id = str(old_id), str(new_id)
+    if not os.path.exists(JSON_FILE):
+        return False, "找不到案件資料檔"
+    with open(JSON_FILE, "r", encoding="utf-8") as f:
+        all_records = json.load(f)
+
+    if any(str(r.get("id", "")) == new_id for r in all_records):
+        return False, f"案件編號 {new_id} 已經有別的案件在用，不能用這個編號"
+
+    idx = next((i for i, r in enumerate(all_records)
+                if str(r.get("id", "")) == old_id
+                and (allowed_unit is None or r.get("unit_level1") == allowed_unit)), None)
+    if idx is None:
+        return False, f"找不到案件 {old_id}，或這筆不屬於您可管理的單位"
+
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    shutil.copyfile(JSON_FILE, os.path.join(BACKUP_DIR, f"records_{stamp}.json"))
+
+    case = dict(all_records[idx])
+    old_paths = case.get("image_paths", [])
+    new_paths = []
+    for fn in old_paths:
+        old_fp = os.path.join(UPLOADS_DIR, os.path.basename(fn))
+        new_fn = fn.replace(old_id, new_id, 1) if fn.startswith(old_id) else fn
+        new_fp = os.path.join(UPLOADS_DIR, os.path.basename(new_fn))
+        try:
+            if os.path.isfile(old_fp) and old_fp != new_fp:
+                os.rename(old_fp, new_fp)
+            new_paths.append(new_fn)
+        except Exception:
+            new_paths.append(fn)
+    case["id"] = new_id
+    case["image_paths"] = new_paths
+    all_records[idx] = case
+
+    tmp_path = JSON_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(all_records, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, JSON_FILE)
+
+    try:
+        append_case_to_excel(all_records)
+    except Exception as e:
+        print(f"Error regenerating Excel: {e}")
+
+    try:
+        log = []
+        if os.path.exists(DELETE_LOG_FILE):
+            with open(DELETE_LOG_FILE, "r", encoding="utf-8") as f:
+                log = json.load(f)
+        log.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": actor or "未記錄",
+            "id": f"{old_id} -> {new_id} (改編號，非刪除)",
+            "scholarship_type": case.get("scholarship_type", ""),
+            "unit_level1": case.get("unit_level1", ""), "unit_level2": case.get("unit_level2", ""),
+            "applicant_name": case.get("applicant_name", ""), "child_name": case.get("child_name", ""),
+            "submitted_at": case.get("submitted_at", ""),
+        })
+        with open(DELETE_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error writing delete log: {e}")
+
+    return True, f"已將案件 {old_id} 改編號為 {new_id}"
+
 def load_all_known_case_ids() -> List[str]:
     """回傳現有案件與所有刪除前備份中出現過的案件編號，讓已刪除的編號不會被重複使用"""
     ids = [str(r.get("id", "")) for r in load_records_json()]
