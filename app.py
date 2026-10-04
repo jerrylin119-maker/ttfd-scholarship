@@ -2234,10 +2234,15 @@ else:
                     kind, text = st.session_state.pop("sheet_clean_result")
                     (st.success if kind == "ok" else st.error)(text)
                 if clean_id.strip() and st.button(f"🧹 從試算表【{clean_type}】分頁刪除【{clean_id.strip()}】", key="sheet_clean_btn"):
-                    still_local = any(str(r.get("id", "")) == clean_id.strip() for r in load_records_json())
+                    # 同時比對編號「跟」類別：同一個編號在不同類別分頁各自代表不同案件 (例如 115-81
+                    # 本局津芳那筆是合法案件，義消那筆才是要清掉的殘留資料)，只比對編號會誤擋。
+                    still_local = any(
+                        str(r.get("id", "")) == clean_id.strip() and r.get("scholarship_type", "") == clean_type
+                        for r in load_records_json()
+                    )
                     if still_local:
                         st.session_state["sheet_clean_result"] = (
-                            "err", f"❌ 本機目前還有案件編號 {clean_id.strip()}，請改用上面「修正編號衝突」或「刪除指定案件」工具，不要用這個。"
+                            "err", f"❌ 本機目前還有【{clean_type}】的案件編號 {clean_id.strip()}，請改用上面「修正編號衝突」或「刪除指定案件」工具，不要用這個。"
                         )
                     else:
                         hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
