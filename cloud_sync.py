@@ -188,19 +188,40 @@ function renumberSeq_(sheet) {
   sheet.getRange(2, 1, lastRow - 1, 1).setValues(seq);
 }
 
-// 明確刪除指定案件編號的列 (用於後台「刪除指定案件」時，同步移除試算表對應資料)
+// 明確刪除指定案件編號的列 (用於後台「刪除指定案件」、「修正編號衝突」時，同步移除試算表對應資料)。
+// 【安全性修正】原本不管三七二十一掃過「每一個分頁」比對案件編號刪除，結果曾經誤刪過另一個
+// 完全不同分頁、剛好用到同一個案件編號的案件 (案件編號是全系統共用一套序號，撞號的話，另一筆
+// 合法案件剛好也在別的分頁用同一個編號，就會被一起掃到)。現在一定要帶 scholarship_type 才會刪，
+// 而且只刪「那個類別自己的分頁」，不會掃到其他分頁，也完全不會動到沒有「獎學金類別」欄位的
+// 舊版分頁 (例如「總表」或各大隊命名的舊分頁)。
 function deleteRecords_(data) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var ids = {};
-  (data.ids || []).forEach(function (id) { ids[String(id).trim()] = true; });
+  var items = data.items;
+  if (!items) {
+    // 向下相容：只有 ids、沒有指定分頁的舊格式呼叫，一律拒絕執行，避免誤刪其他分頁的同編號案件。
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      error: "缺少 items (需附上每筆案件所屬的 scholarship_type，避免誤刪到其他分頁同編號的案件)"
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+  var byType = {};
+  items.forEach(function (it) {
+    var id = String(it.id || "").trim();
+    var t = String(it.scholarship_type || "").trim();
+    if (!id || !t) return;
+    if (!byType[t]) byType[t] = {};
+    byType[t][id] = true;
+  });
   var deleted = [];
-  var sheets = ss.getSheets();
-  for (var s = 0; s < sheets.length; s++) {
-    var sheet = sheets[s];
+  Object.keys(byType).forEach(function (typeName) {
+    var sheet = ss.getSheetByName(typeName);
+    if (!sheet) return;
+    var headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    if (headers.indexOf("獎學金類別") === -1) return; // 不是目前系統格式的分頁，不動它
     var lastRow = sheet.getLastRow();
-    if (lastRow < 2) continue;
+    if (lastRow < 2) return;
+    var ids = byType[typeName];
     var idVals = sheet.getRange(2, ID_COL_, lastRow - 1, 1).getValues();
-    // 由下往上刪，避免刪除後列號位移影響尚未處理的列
     for (var r = idVals.length - 1; r >= 0; r--) {
       var id = String(idVals[r][0] || "").trim();
       if (id && ids[id]) {
@@ -209,7 +230,7 @@ function deleteRecords_(data) {
       }
     }
     renumberSeq_(sheet);
-  }
+  });
   return ContentService.createTextOutput(JSON.stringify({status: "ok", deleted: deleted}))
     .setMimeType(ContentService.MimeType.JSON);
 }
@@ -891,15 +912,23 @@ def restore_from_snapshot(webhook_url: str, backup_id: str) -> Tuple[bool, Any]:
     return True, data.get("restored", [])
 
 
-def delete_from_google_sheets(webhook_url: str, ids: List[str]) -> Tuple[bool, str]:
-    """明確通知 Google 試算表刪除指定案件編號的列 (用於後台刪除案件時，讓試算表與本機保持一致)"""
+def delete_from_google_sheets(webhook_url: str, records: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """
+    明確通知 Google 試算表刪除指定案件的列 (用於後台刪除案件、修正編號衝突時，讓試算表與本機保持一致)。
+    records 需要是完整案件物件的清單 (至少要有 id 跟 scholarship_type)：案件編號是全系統共用一套序號，
+    必須同時帶 scholarship_type 才能精準刪除「那一個分頁」對應的那一列，避免掃到其他分頁剛好同編號的
+    另一筆合法案件 (之前就因為只憑 id 刪、沒指定分頁，誤刪過不相干的案件)。
+    """
     clean_url = webhook_url.strip() if webhook_url else ""
     if not clean_url or not clean_url.startswith("http"):
         return False, "未設定有效的 Google 試算表 Webhook 網址"
-    ids = [str(i) for i in (ids or []) if str(i).strip()]
-    if not ids:
+    items = [
+        {"id": str(r.get("id", "")), "scholarship_type": str(r.get("scholarship_type", ""))}
+        for r in (records or []) if str(r.get("id", "")).strip() and str(r.get("scholarship_type", "")).strip()
+    ]
+    if not items:
         return True, "沒有需要從試算表刪除的案件"
-    payload = {"action": "delete_records", "ids": ids}
+    payload = {"action": "delete_records", "items": items}
     try:
         resp = requests.post(
             clean_url,

@@ -2075,6 +2075,9 @@ else:
                     if not can_delete():
                         return
                     ids = list(st.session_state.get("admin_del_select", []))
+                    # 刪除前先記下每筆案件的 scholarship_type：試算表那邊刪除時需要同時指定案件編號
+                    # 跟所屬分頁，才不會誤刪到其他分頁剛好同編號的另一筆案件。
+                    type_by_id = {str(r.get("id", "")): r.get("scholarship_type", "") for r in stored_records}
                     deleted_ids, msg = delete_cases_from_storage(ids, allowed_unit=current_scope(), actor=actor_label())
                     if not deleted_ids:
                         st.session_state["del_result"] = ("err", f"❌ {msg}")
@@ -2094,7 +2097,8 @@ else:
                     hook = st.session_state.get("google_sheet_webhook", "") or load_persistent_webhook()
                     if hook:
                         try:
-                            ok_s, msg_s = delete_from_google_sheets(hook, deleted_ids)
+                            del_records = [{"id": cid, "scholarship_type": type_by_id.get(cid, "")} for cid in deleted_ids]
+                            ok_s, msg_s = delete_from_google_sheets(hook, del_records)
                             text += f"　☁️ 雲端試算表：{msg_s}"
                         except Exception as e:
                             text += f"　⚠️ 雲端試算表同步刪除失敗，請洽業務科手動處理：{e}"
@@ -2184,6 +2188,7 @@ else:
                             key="reassign_new_id"
                         )
                         if st.button(f"🔀 把【{pick_old}】改成【{new_id_input}】", type="primary", key="reassign_btn"):
+                            old_type = next((r.get("scholarship_type", "") for r in stored_records2 if str(r.get("id", "")) == pick_old), "")
                             ok_r, msg_r = reassign_case_id(pick_old, new_id_input.strip(), allowed_unit=current_scope(), actor=actor_label())
                             if not ok_r:
                                 st.session_state["reassign_result"] = ("err", f"❌ {msg_r}")
@@ -2192,7 +2197,7 @@ else:
                                 text = f"✅ {msg_r}"
                                 if hook:
                                     try:
-                                        ok_del, msg_del = delete_from_google_sheets(hook, [pick_old])
+                                        ok_del, msg_del = delete_from_google_sheets(hook, [{"id": pick_old, "scholarship_type": old_type}])
                                         text += f"　☁️ 舊編號從試算表移除：{msg_del}"
                                     except Exception as e:
                                         text += f"　⚠️ 舊編號從試算表移除失敗：{e}"
