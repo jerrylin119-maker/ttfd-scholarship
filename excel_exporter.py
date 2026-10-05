@@ -3,6 +3,7 @@
 """
 
 import io
+import re
 from datetime import datetime
 from typing import List, Dict, Any
 import openpyxl
@@ -14,9 +15,19 @@ from org_structure import SCHOLARSHIP_TYPES
 UNCLASSIFIED_LABEL = "未分類"
 
 
+def _case_sort_key(r: Dict[str, Any]):
+    """依案號 (如 115-42) 的年度與序號數值排序，不是資料原本的載入順序 (通常是送件/同步先後)，
+    不然匯出的紙本總表案號會跳來跳去，承辦人核對紙本申請表時很難對。跟 app.py 的 case_sort_key
+    邏輯一致，這裡獨立複製一份，避免 excel_exporter 反過來 import app.py 造成循環匯入。"""
+    m = re.match(r"^(\d+)-(\d+)$", str(r.get("id", "")))
+    if m:
+        return (0, int(m.group(1)), int(m.group(2)))
+    return (1, 0, str(r.get("id", "")))
+
+
 def _group_records_by_type(records: List[Dict[str, Any]]):
     """依「獎學金類別」將紀錄分組；固定先列出 SCHOLARSHIP_TYPES 兩類 (即使 0 筆也建立分頁)，
-    若有舊資料缺少此欄位或值不在名單內，則額外歸入「未分類」分頁。"""
+    若有舊資料缺少此欄位或值不在名單內，則額外歸入「未分類」分頁。各類別內部依案件編號排序。"""
     grouped = {t: [] for t in SCHOLARSHIP_TYPES}
     unclassified = []
     for r in records:
@@ -26,9 +37,9 @@ def _group_records_by_type(records: List[Dict[str, Any]]):
         else:
             unclassified.append(r)
 
-    ordered = [(t, grouped[t]) for t in SCHOLARSHIP_TYPES]
+    ordered = [(t, sorted(grouped[t], key=_case_sort_key)) for t in SCHOLARSHIP_TYPES]
     if unclassified:
-        ordered.append((UNCLASSIFIED_LABEL, unclassified))
+        ordered.append((UNCLASSIFIED_LABEL, sorted(unclassified, key=_case_sort_key)))
     return ordered
 
 
