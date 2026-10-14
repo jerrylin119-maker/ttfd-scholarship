@@ -57,8 +57,6 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
 
     font_title = Font(name="微軟正黑體", size=16, bold=True, color="1F4E79")
     font_subtitle = Font(name="微軟正黑體", size=10, italic=True, color="595959")
-    font_summary_label = Font(name="微軟正黑體", size=10, bold=True, color="333333")
-    font_summary_val = Font(name="微軟正黑體", size=11, bold=True, color="1F4E79")
     font_header = Font(name="微軟正黑體", size=11, bold=True, color="FFFFFF")
     font_data = Font(name="微軟正黑體", size=10, color="000000")
     font_status_eligible = Font(name="微軟正黑體", size=10, bold=True, color="155724")
@@ -66,7 +64,6 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     font_status_ineligible = Font(name="微軟正黑體", size=10, bold=True, color="721C24")
 
     fill_header = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    fill_sub_header = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     fill_zebra = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
     fill_eligible = PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid")
     fill_pending = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
@@ -77,13 +74,6 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     border_header = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=Side(style='medium', color='1F4E79'))
 
     align_center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    align_left = Alignment(horizontal='left', vertical='center', wrap_text=True)
-
-    total_count = len(records)
-    eligible_count = sum(1 for r in records if r.get("review_status") == "符合資格")
-    pending_count = sum(1 for r in records if r.get("review_status") == "待補件")
-    ineligible_count = sum(1 for r in records if r.get("review_status") == "不符資格")
-    pass_rate = f"{(eligible_count / total_count * 100):.1f}%" if total_count > 0 else "0.0%"
 
     # 1. 標題與副標題 (A1:H1, A2:H2)
     ws.merge_cells("A1:H1")
@@ -99,48 +89,22 @@ def _build_sheet(ws, records: List[Dict[str, Any]], type_label: str):
     ws["A2"].alignment = align_center
     ws.row_dimensions[2].height = 20
 
-    # 2. 統計摘要列 (Row 3 & 4)
-    summary_items = [
-        ("A3", "B3", "A4", "B4", "總申請件數", f"{total_count} 件"),
-        ("C3", "C3", "C4", "C4", "符合資格", f"{eligible_count} 件"),
-        ("D3", "D3", "D4", "D4", "待補件", f"{pending_count} 件"),
-        ("E3", "E3", "E4", "E4", "不符資格", f"{ineligible_count} 件"),
-        ("F3", "H3", "F4", "H4", "核定通過率", pass_rate)
-    ]
-
-    for l_start, l_end, v_start, v_end, label, val in summary_items:
-        ws.merge_cells(f"{l_start}:{l_end}")
-        ws[l_start] = label
-        ws[l_start].font = font_summary_label
-        ws[l_start].alignment = align_center
-        ws[l_start].fill = fill_sub_header
-
-        ws.merge_cells(f"{v_start}:{v_end}")
-        ws[v_start] = val
-        ws[v_start].font = font_summary_val
-        ws[v_start].alignment = align_center
-        ws[v_start].fill = PatternFill(start_color="F2F4F8", end_color="F2F4F8", fill_type="solid")
-
-    ws.row_dimensions[3].height = 20
-    ws.row_dimensions[4].height = 24
-    ws.row_dimensions[5].height = 10
-
-    # 3. 表頭 (Row 6)
+    # 2. 表頭 (Row 3)
     headers = [
         "序號", "案件編號", "大隊 / 局本部", "分隊 / 科室", "申請人姓名", "子女姓名", "申請組別", "審核結果"
     ]
 
     for col_idx, h in enumerate(headers, 1):
-        cell = ws.cell(row=6, column=col_idx, value=h)
+        cell = ws.cell(row=3, column=col_idx, value=h)
         cell.font = font_header
         cell.fill = fill_header
         cell.alignment = align_center
         cell.border = border_header
 
-    ws.row_dimensions[6].height = 28
+    ws.row_dimensions[3].height = 28
 
-    # 4. 資料內容 (Row 7+)
-    start_row = 7
+    # 3. 資料內容 (Row 4+)
+    start_row = 4
     for idx, r in enumerate(records, 1):
         curr_row = start_row + idx - 1
         status = r.get("review_status", "待審核")
