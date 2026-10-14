@@ -1191,29 +1191,6 @@ else:
             f"【{ai_failed_ids}】。請至「🔍 左圖右表」案件複核工作台開啟，手動輸入或點「重新以 AI 分析此案件」。"
         )
 
-    total_count = len(records)
-    eligible_count = sum(1 for r in records if r.get("review_status") == "符合資格")
-    pending_count = sum(1 for r in records if r.get("review_status") == "待補件")
-    ineligible_count = sum(1 for r in records if r.get("review_status") == "不符資格")
-    confirmed_count = sum(1 for r in records if r.get("review_confirmed"))
-    pass_rate = f"{(eligible_count / total_count * 100):.1f}%" if total_count > 0 else "0.0%"
-
-    col_kpi1, col_kpi2, col_kpi3, col_kpi4, col_kpi5, col_kpi6 = st.columns(6)
-    with col_kpi1:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">總申請件數</div><div class="stat-val" style="color:#1e3c72;">{total_count} <span style="font-size:14px;font-weight:normal;">件</span></div></div>', unsafe_allow_html=True)
-    with col_kpi2:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">符合資格</div><div class="stat-val" style="color:#059669;">{eligible_count} <span style="font-size:14px;font-weight:normal;">人</span></div></div>', unsafe_allow_html=True)
-    with col_kpi3:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">待補件</div><div class="stat-val" style="color:#d97706;">{pending_count} <span style="font-size:14px;font-weight:normal;">人</span></div></div>', unsafe_allow_html=True)
-    with col_kpi4:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">不符資格</div><div class="stat-val" style="color:#dc2626;">{ineligible_count} <span style="font-size:14px;font-weight:normal;">人</span></div></div>', unsafe_allow_html=True)
-    with col_kpi5:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">核定通過率</div><div class="stat-val" style="color:#2563eb;">{pass_rate}</div></div>', unsafe_allow_html=True)
-    with col_kpi6:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">複審完畢</div><div class="stat-val" style="color:#0d9488;">{confirmed_count} <span style="font-size:14px;font-weight:normal;">件</span></div></div>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
     # 業務科看得到全部大隊，才是真正的「全局」；各大隊帳號看到的只有自己大隊的案件，
     # 標示「大隊審核總表清冊」比較不會讓大隊同仁誤會還能看到別的大隊。
     table_scope_label = "大隊審核總表清冊" if current_scope() else "全局審核總表清冊"
